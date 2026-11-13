@@ -6,7 +6,7 @@ Finds trending YouTube videos, selects an engaging segment, crops to vertical 9:
 Creating short-form content from long-form video traditionally requires hours of manual scouting, clipping, and editing. Shorts Clipper automates the entire pipeline. It discovers trending videos, finds the most engaging segment, edits it for vertical viewing, and publishes it autonomously.
 
 ## What is different from other projects?
-Most AI video clippers rely heavily on Large Language Models (LLMs) to choose where to clip. This is slow, expensive, and non-deterministic. Shorts Clipper’s segment selection is **deterministic** — no LLM is involved in choosing *what* to clip. An ensemble of 8 scoring judges evaluates transcript features (hooks, silence gaps, narrative arc, information density, etc.) to pick the best segment locally. Claude is used only for metadata generation (titles/tags) and upstream semantic filtering during discovery.
+Most AI video clippers rely heavily on Large Language Models (LLMs) to choose where to clip. This is slow, expensive, and non-deterministic. Shorts Clipper’s segment selection is **deterministic** — no LLM is involved in choosing *what* to clip. An ensemble of 8 scoring judges evaluates transcript features (hooks, silence gaps, narrative arc, information density, etc.) to pick the best segment locally. An LLM (Gemini by default, Claude optionally) is used only for metadata generation (titles/tags) and upstream semantic filtering during discovery.
 
 ## Architecture
 
@@ -16,7 +16,7 @@ graph LR
     B --> C["Download<br/>yt-dlp segment"]
     C --> D["Transcription<br/>faster-whisper"]
     D --> E["Rendering<br/>FFmpeg 2-pass"]
-    E --> F["Metadata<br/>Claude"]
+    E --> F["Metadata<br/>Gemini / Claude"]
     F --> G["Publishing<br/>YouTube / Instagram"]
 
     style A fill:#2d333b,stroke:#444,color:#e6edf3
@@ -30,12 +30,12 @@ graph LR
 
 | Stage | Directory | What it does |
 |---|---|---|
-| **Scout V2** | `shorts_clipper/scout/` | Searches YouTube via yt-dlp (optionally YouTube Data API). Stage A ranks candidates by views, recency, engagement. Top 3 go to Stage B where Claude evaluates clip generation potential. Counterfactual variant simulation optimizes the final pick. |
+| **Scout V2** | `shorts_clipper/scout/` | Searches YouTube via yt-dlp (optionally YouTube Data API). Stage A ranks candidates by views, recency, engagement. Top 3 go to Stage B where the LLM evaluates clip generation potential. Counterfactual variant simulation optimizes the final pick. |
 | **Editorial Engine** | `shorts_clipper/editorial/` | Deterministic segment selection. 8 plugin judges (hook, silence, length, context, emotion, narrative arc, information density, question-answer) score candidate segments. Feature store pre-computes transcript features. No LLM. |
 | **Download** | `shorts_clipper/downloader/` | Downloads only the selected segment via yt-dlp, not the full video. |
 | **Transcription** | `shorts_clipper/transcription/` | Runs faster-whisper locally (CPU or GPU). Produces word-level timestamps for subtitle generation. |
 | **Rendering** | `shorts_clipper/rendering/` | Two-pass FFmpeg. Pass 1: vertical crop (16:9 → 9:16, center crop). Pass 2: subtitle burn with ASS styling and configurable pacing. |
-| **Metadata** | `shorts_clipper/providers/claude.py` | Claude generates title, description, and tags. This is the only LLM call in the main pipeline. |
+| **Metadata** | `shorts_clipper/providers/` | Gemini (default) or Claude generates title, description, and tags. This is the only LLM call in the main pipeline. |
 | **Publishing** | `shorts_clipper/publishers/` | Registry-based. Ships with YouTube (OAuth2, resumable upload) and Instagram (Graph API). |
 | **Observability** | `shorts_clipper/core/observability.py` | RunContext singleton tracks decision traces, attention reports, variant reports, score breakdowns. Exports JSON artifacts per run. |
 
@@ -50,7 +50,7 @@ cd shorts-clipper
 pip install -e .
 
 # Minimum config — just metadata generation needs an API key
-echo "ANTHROPIC_API_KEY=your-key-here" > .env
+echo "GEMINI_API_KEY=your-key-here" > .env
 
 # Clip a specific video (no publishing)
 shorts-clipper clip https://www.youtube.com/watch?v=dQw4w9WgXcQ
@@ -107,7 +107,7 @@ Commands:
 
 | Variable | Description |
 |---|---|
-| `ANTHROPIC_API_KEY` | Anthropic API key (from console.anthropic.com). Used for metadata generation and semantic validation in Scout. |
+| `GEMINI_API_KEY` | Google Gemini API key (free tier available via Google AI Studio). Used for metadata generation and semantic validation in Scout. Not needed if `SHORTS_PROVIDER=anthropic`. |
 
 ### Publishing (required for `--upload`)
 
@@ -135,10 +135,10 @@ Commands:
 | `SHORTS_SUBTITLE_STYLE` | `default` | Subtitle styling preset |
 | `SHORTS_PROXY` | — | HTTP proxy for yt-dlp and network requests |
 | `SHORTS_PUBLISH_PLATFORMS` | `youtube,instagram` | Comma-separated list of platforms |
-| `SHORTS_PROVIDER` | `anthropic` | AI provider: `anthropic` (Claude) or `gemini` |
+| `SHORTS_PROVIDER` | `gemini` | AI provider: `gemini` or `anthropic` (Claude) |
 | `SHORTS_CLAUDE_MODEL` | `claude-opus-5-5` | Claude model used for all AI calls |
 | `SHORTS_CLAUDE_EFFORT` | `medium` | Claude effort level: `low`, `medium`, `high`, `xhigh`, `max` |
-| `GEMINI_API_KEY` | — | Google Gemini API key (only if `SHORTS_PROVIDER=gemini`) |
+| `ANTHROPIC_API_KEY` | — | Anthropic API key (only if `SHORTS_PROVIDER=anthropic`; pay-as-you-go) |
 | `SHORTS_LOG_LEVEL` | `INFO` | Logging verbosity |
 | `SHORTS_OUTPUT_DIR` | `outputs` | Output directory for rendered clips |
 | `SHORTS_CACHE_DIR` | `.cache/shorts-clipper` | Cache directory |
@@ -185,7 +185,7 @@ Rough numbers from a 2-core CPU, `tiny.en` model, no GPU. Not rigorously benchma
 | FFmpeg subtitle burn | ~2.5 min |
 | YouTube upload (120 MB) | ~5 min |
 
-Each clip makes a handful of Claude API calls, billed to your Anthropic API account (set `SHORTS_PROVIDER=gemini` to use the Gemini free tier instead). GPU (`SHORTS_ENABLE_GPU=true`) significantly reduces transcription and rendering time.
+API cost per clip is effectively zero on the Gemini free tier. With `SHORTS_PROVIDER=anthropic`, calls are billed to your Anthropic API account. GPU (`SHORTS_ENABLE_GPU=true`) significantly reduces transcription and rendering time.
 
 ## Project Structure
 
@@ -290,7 +290,7 @@ Because segment selection relies on deterministic heuristics rather than LLMs, e
 A: Yes. `faster-whisper` falls back to CPU by default. Expect transcription to be slower (e.g., ~1 minute for 2 minutes of audio).
 
 **Q: Do I need to pay for the AI calls?**
-A: By default the pipeline calls Claude through the Anthropic API, which is pay-as-you-go and separate from a Claude subscription. Set `SHORTS_PROVIDER=gemini` with a `GEMINI_API_KEY` to use Gemini instead.
+A: By default the pipeline uses Gemini, which has a free tier via Google AI Studio. Set `SHORTS_PROVIDER=anthropic` with an `ANTHROPIC_API_KEY` to use Claude instead; that is pay-as-you-go and separate from a Claude subscription.
 
 **Q: Why doesn't the YouTube uploader resume uploads?**
 A: The current `google-api-python-client` integration resets the upload cursor on timeout. A true chunked resume implementation is planned for a future release.

@@ -29,9 +29,9 @@ def _provider(reply, stop_reason="end_turn"):
     return provider, create
 
 
-def test_factory_defaults_to_claude():
+def test_factory_selects_claude():
     with patch("anthropic.Anthropic") as client_cls:
-        provider = get_provider(Settings(anthropic_api_key="k"))
+        provider = get_provider(Settings(anthropic_api_key="k", default_provider="anthropic"))
     assert isinstance(provider, ClaudeProvider)
     assert client_cls.call_args.kwargs["api_key"] == "k"
 

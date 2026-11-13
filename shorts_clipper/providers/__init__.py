@@ -12,7 +12,7 @@ def is_claude(settings: Any) -> bool:
 
 
 def get_provider(settings: Any = None, **kwargs: Any):
-    """Return the AI provider selected by SHORTS_PROVIDER (Claude by default)."""
+    """Return the AI provider selected by SHORTS_PROVIDER (Gemini by default)."""
     if settings is None:
         from shorts_clipper.core.settings import Settings
 

@@ -268,7 +268,7 @@ class ClipMetadataUpdate(BaseModel):
 class SettingsModel(BaseModel):
     anthropic_api_key: str | None = None
     gemini_api_key: str | None = None
-    provider: str = "anthropic"
+    provider: str = "gemini"
     whisper_model: str = "tiny.en"
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
@@ -1098,7 +1098,7 @@ def save_settings(payload: SettingsModel) -> dict[str, str]:
     try:
         env_lines = []
         # Construct .env file lines
-        env_lines.append(f"SHORTS_PROVIDER={payload.provider or 'anthropic'}")
+        env_lines.append(f"SHORTS_PROVIDER={payload.provider or 'gemini'}")
         env_lines.append(f"ANTHROPIC_API_KEY={payload.anthropic_api_key or ''}")
         env_lines.append(f"GEMINI_API_KEY={payload.gemini_api_key or ''}")
         env_lines.append(f"SHORTS_WHISPER_MODEL={payload.whisper_model}")

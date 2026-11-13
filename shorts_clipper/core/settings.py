@@ -39,7 +39,7 @@ class Settings:
     ig_access_token: str | None = None
     ig_account_id: str | None = None
     ollama_base_url: str = "http://localhost:11434"
-    default_provider: str = "anthropic"
+    default_provider: str = "gemini"
     whisper_model: str = "tiny.en"
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
@@ -121,7 +121,7 @@ class Settings:
             ig_account_id=_env("IG_ACCOUNT_ID", file_values),
             ollama_base_url=_env("OLLAMA_BASE_URL", file_values, "http://localhost:11434")
             or "http://localhost:11434",
-            default_provider=_env("SHORTS_PROVIDER", file_values, "anthropic") or "anthropic",
+            default_provider=_env("SHORTS_PROVIDER", file_values, "gemini") or "gemini",
             whisper_model=_env("SHORTS_WHISPER_MODEL", file_values, "tiny.en") or "tiny.en",
             whisper_device=whisper_device,
             whisper_compute_type=whisper_compute_type,
