@@ -149,17 +149,13 @@ Return ONLY valid JSON in this format:
 """
 
         try:
-            from google import genai
+            from shorts_clipper.providers import get_provider
 
-            from shorts_clipper.providers.gemini import GeminiProvider
-
-            provider = GeminiProvider(api_key=self.settings.gemini_api_key)
+            provider = get_provider(self.settings)
 
             response = provider.generate_content(
                 contents=prompt,
-                config=genai.types.GenerateContentConfig(
-                    response_mime_type="application/json", temperature=0.0
-                ),
+                config={"response_mime_type": "application/json", "temperature": 0.0},
             )
 
             res = json.loads(response.text)

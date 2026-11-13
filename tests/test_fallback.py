@@ -21,7 +21,7 @@ class FallbackMetadataTests(unittest.TestCase):
     @patch("shorts_clipper.pipeline.runner.burn_subtitles")
     @patch("shorts_clipper.pipeline.runner.transcribe_clip")
     @patch("shorts_clipper.pipeline.runner.PublishingEngine")
-    @patch("shorts_clipper.pipeline.runner.GeminiProvider")
+    @patch("shorts_clipper.pipeline.runner.get_provider")
     @patch("shorts_clipper.core.cache.get_cached")
     @patch("shorts_clipper.pipeline.runner.fetch_subtitles")
     def test_gemini_fallback_success(

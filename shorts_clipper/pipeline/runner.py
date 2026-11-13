@@ -30,7 +30,7 @@ from shorts_clipper.downloader.yt_dlp import (
     fetch_subtitles,
 )
 from shorts_clipper.pipeline.finisher import EditorialFinisher
-from shorts_clipper.providers.gemini import GeminiProvider
+from shorts_clipper.providers import get_provider
 from shorts_clipper.publishers import ClipMetadata, PublishingEngine
 from shorts_clipper.rendering.crop import process_to_vertical
 from shorts_clipper.scout.trending import get_trending_link
@@ -401,7 +401,7 @@ def run(
                 actual_niche = niche or "tech"
 
                 try:
-                    provider = GeminiProvider(api_key=settings.gemini_api_key)
+                    provider = get_provider(settings)
                     ai_meta = provider.generate_clip_metadata(
                         precision_segments, source_title=s_title, source_channel=s_channel
                     )

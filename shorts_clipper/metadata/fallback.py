@@ -57,17 +57,13 @@ Return ONLY valid JSON in this exact structure:
 """
 
     try:
-        from google import genai
+        from shorts_clipper.providers import get_provider
 
-        from shorts_clipper.providers.gemini import GeminiProvider
-
-        provider = GeminiProvider(api_key=settings.gemini_api_key)
+        provider = get_provider(settings)
 
         response = provider.generate_content(
             contents=prompt,
-            config=genai.types.GenerateContentConfig(
-                response_mime_type="application/json", temperature=0.7
-            ),
+            config={"response_mime_type": "application/json", "temperature": 0.7},
         )
 
         res = json.loads(response.text)

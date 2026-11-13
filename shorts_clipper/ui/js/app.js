@@ -512,6 +512,8 @@
                 const data = await res.json();
                 
                 document.getElementById('set-gemini-key').value = data.gemini_api_key || "";
+                document.getElementById('set-anthropic-key').value = data.anthropic_api_key || "";
+                window._aiProvider = data.provider || "anthropic";
                 document.getElementById('set-whisper-model').value = data.whisper_model;
                 document.getElementById('set-whisper-device').value = data.whisper_device;
                 document.getElementById('set-whisper-compute').value = data.whisper_compute_type;
@@ -570,6 +572,8 @@
 
             const body = {
                 gemini_api_key: document.getElementById('set-gemini-key').value,
+                anthropic_api_key: document.getElementById('set-anthropic-key').value,
+                provider: window._aiProvider || "anthropic",
                 whisper_model: document.getElementById('set-whisper-model').value,
                 whisper_device: document.getElementById('set-whisper-device').value,
                 whisper_compute_type: document.getElementById('set-whisper-compute').value,
@@ -980,7 +984,7 @@
                 currentSegments = transcriptData.segments;
                 
                 // Step 3: Consulting Gemini to Select Top Highlights
-                loadingText.textContent = "[2/2] AI Ranking viral clips using Gemini Thinking engine...";
+                loadingText.textContent = "[2/2] AI Ranking viral clips using Claude...";
                 const highlightsRes = await fetch('/api/scout/highlights', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -1644,7 +1648,7 @@
                     showToast("Title auto-generated successfully!", "success");
                 } else {
                     const data = await res.json();
-                    showToast("Title Auto-Generation failed: " + (data.detail || "Make sure Gemini API key is configured."), "error");
+                    showToast("Title Auto-Generation failed: " + (data.detail || "Make sure the Anthropic API key is configured."), "error");
                 }
             } catch(e) {
                 showToast("Error generating title: " + e, "error");
@@ -1898,12 +1902,12 @@
             const typing = document.createElement('div');
             typing.className = "assistant-msg ai";
             typing.id = "assistant-typing-indicator";
-            typing.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Gemini is thinking...`;
+            typing.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Claude is thinking...`;
             chatLog.appendChild(typing);
             chatLog.scrollTop = chatLog.scrollHeight;
             
             try {
-                const res = await fetch('/api/gemini/chat', {
+                const res = await fetch('/api/assistant/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -1921,7 +1925,7 @@
                     addAssistantMessage('ai', data.text || "");
                 } else {
                     const err = await res.json();
-                    addAssistantMessage('ai', "Error from Gemini: " + (err.detail || "Request failed. Check Gemini API key configuration."));
+                    addAssistantMessage('ai', "Error from Claude: " + (err.detail || "Request failed. Check the Anthropic API key configuration."));
                 }
             } catch (err) {
                 const indicator = document.getElementById('assistant-typing-indicator');

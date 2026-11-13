@@ -20,7 +20,7 @@ from shorts_clipper.core.logging import configure_logging
 from shorts_clipper.core.queue import JobQueue, JobStatus
 from shorts_clipper.core.settings import Settings
 from shorts_clipper.pipeline.runner import run, run_autopilot
-from shorts_clipper.providers.gemini import GeminiProvider
+from shorts_clipper.providers import get_provider
 
 # Setup logging
 configure_logging("INFO")
@@ -380,7 +380,7 @@ def run_worker() -> None:
                     "publish_error": None,
                 }
                 try:
-                    provider = GeminiProvider(api_key=settings.gemini_api_key)
+                    provider = get_provider(settings)
                     ai_meta = provider.generate_clip_metadata(precision_segments)
                     meta["title"] = ai_meta["title"]
                     meta["description"] = ai_meta["description"]

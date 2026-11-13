@@ -98,13 +98,16 @@ NICHE_KEYWORDS: dict[str, list[str]] = {
 
 
 def _expand_niche_dynamically(niche: str) -> list[str]:
-    """Use Gemini to semantically expand unknown niches."""
+    """Use the configured AI provider to semantically expand unknown niches."""
+    pace = True
     try:
         from shorts_clipper.core.settings import Settings
-        from shorts_clipper.providers.gemini import GeminiProvider
+        from shorts_clipper.providers import get_provider, is_claude
 
         settings = Settings.from_env()
-        provider = GeminiProvider(api_key=settings.gemini_api_key)
+        provider = get_provider(settings)
+        # The 35s pause only exists to respect Gemini's free-tier 2 RPM limit.
+        pace = not is_claude(settings)
 
         prompt = f"""
         Expand the following niche into exactly 6 highly relevant YouTube search keywords.
@@ -117,17 +120,19 @@ def _expand_niche_dynamically(niche: str) -> list[str]:
         response = provider.generate_content(prompt)
         parts = [p.strip() for p in response.text.split(",") if p.strip()]
         if len(parts) >= 3:
-            import time
+            if pace:
+                import time
 
-            print("Sleeping 35 seconds after niche expansion to respect 2 RPM limit...")
-            time.sleep(35)
+                print("Sleeping 35 seconds after niche expansion to respect 2 RPM limit...")
+                time.sleep(35)
             return parts
     except Exception:
         pass
-    import time
+    if pace:
+        import time
 
-    print("Sleeping 35 seconds after failed niche expansion to respect 2 RPM limit...")
-    time.sleep(35)
+        print("Sleeping 35 seconds after failed niche expansion to respect 2 RPM limit...")
+        time.sleep(35)
     return ["tips", "story", "analysis", "news", "guide", "highlights"]
 
 

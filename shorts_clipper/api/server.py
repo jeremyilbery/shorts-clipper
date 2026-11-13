@@ -29,7 +29,7 @@ from shorts_clipper.analyze.feedback import ClipFeedback, FeedbackStore
 from shorts_clipper.core.queue import JobQueue, JobStatus
 from shorts_clipper.core.settings import Settings
 from shorts_clipper.downloader.yt_dlp import download_audio, fetch_subtitles
-from shorts_clipper.providers.gemini import GeminiProvider
+from shorts_clipper.providers import get_provider
 from shorts_clipper.transcription.whisper import transcribe_clip
 
 # ---------------------------------------------------------------------------
@@ -266,7 +266,9 @@ class ClipMetadataUpdate(BaseModel):
 
 
 class SettingsModel(BaseModel):
+    anthropic_api_key: str | None = None
     gemini_api_key: str | None = None
+    provider: str = "anthropic"
     whisper_model: str = "tiny.en"
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
@@ -691,7 +693,7 @@ def autogen_clip_title(clip_name: str) -> dict[str, Any]:
     ]
 
     try:
-        provider = GeminiProvider(api_key=settings.gemini_api_key)
+        provider = get_provider(settings)
         ai_meta = provider.generate_clip_metadata(segments)
 
         meta["title"] = ai_meta["title"]
@@ -1076,7 +1078,9 @@ def get_settings() -> SettingsModel:
     """Read configuration from environment variables."""
     s = Settings.from_env()
     return SettingsModel(
+        anthropic_api_key=s.anthropic_api_key,
         gemini_api_key=s.gemini_api_key,
+        provider=s.default_provider,
         whisper_model=s.whisper_model,
         whisper_device=s.whisper_device,
         whisper_compute_type=s.whisper_compute_type,
@@ -1094,6 +1098,8 @@ def save_settings(payload: SettingsModel) -> dict[str, str]:
     try:
         env_lines = []
         # Construct .env file lines
+        env_lines.append(f"SHORTS_PROVIDER={payload.provider or 'anthropic'}")
+        env_lines.append(f"ANTHROPIC_API_KEY={payload.anthropic_api_key or ''}")
         env_lines.append(f"GEMINI_API_KEY={payload.gemini_api_key or ''}")
         env_lines.append(f"SHORTS_WHISPER_MODEL={payload.whisper_model}")
         env_lines.append(f"SHORTS_WHISPER_DEVICE={payload.whisper_device}")
@@ -1195,7 +1201,7 @@ def get_video_details(payload: TranscriptRequest) -> dict[str, str]:
 @app.post("/api/scout/highlights")
 def trigger_scout_highlights(payload: HighlightsRequest) -> dict[str, Any]:
     """Send transcript segments to Gemini and retrieve scored candidate highlight clips."""
-    logger.info("🧠 Consulting Gemini to select highlights...")
+    logger.info("🧠 Consulting the AI provider to select highlights...")
     try:
         from shorts_clipper.core.models import TranscriptSegment
 
@@ -1203,12 +1209,12 @@ def trigger_scout_highlights(payload: HighlightsRequest) -> dict[str, Any]:
             TranscriptSegment(start=s.start, end=s.end, text=s.text) for s in payload.segments
         ]
         settings = Settings.from_env()
-        provider = GeminiProvider(api_key=settings.gemini_api_key)
+        provider = get_provider(settings)
 
         clips = provider.select_multiple_clips_detailed(segments, count=payload.count)
         return {"highlights": clips}
     except Exception as exc:
-        logger.error("Failed to fetch highlights from Gemini: %s", exc)
+        logger.error("Failed to fetch highlights from the AI provider: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -1224,12 +1230,13 @@ def trigger_clip_render(payload: CustomClipRenderRequest) -> dict[str, Any]:
     }
 
 
-@app.post("/api/gemini/chat")
+@app.post("/api/assistant/chat")
+@app.post("/api/gemini/chat", include_in_schema=False)
 def gemini_chat(payload: GeminiChatRequest) -> dict[str, Any]:
     """Interact with Gemini as an AI metadata co-writer for titles, descriptions, hooks, and tags."""
     try:
         settings = Settings.from_env()
-        provider = GeminiProvider(api_key=settings.gemini_api_key)
+        provider = get_provider(settings)
 
         system_instruction = (
             "You are an elite, highly experienced viral video editor and content strategist. "
@@ -1238,11 +1245,15 @@ def gemini_chat(payload: GeminiChatRequest) -> dict[str, Any]:
             "to make your responses highly tailored."
         )
 
-        prompt_context = f"System Instruction: {system_instruction}\n\nClip Transcript Context:\n{payload.context}\n\nUser Request: {payload.prompt}"
-        response = provider.generate_content(prompt_context)
+        prompt_context = (
+            f"Clip Transcript Context:\n{payload.context}\n\nUser Request: {payload.prompt}"
+        )
+        response = provider.generate_content(
+            prompt_context, config={"system_instruction": system_instruction}
+        )
         return {"text": response.text.strip()}
     except Exception as exc:
-        logger.error("Failed to chat with Gemini: %s", exc)
+        logger.error("Failed to chat with the AI provider: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

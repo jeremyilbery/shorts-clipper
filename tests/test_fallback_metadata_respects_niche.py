@@ -7,7 +7,7 @@ from shorts_clipper.pipeline.runner import run
 
 
 @mock.patch("shorts_clipper.pipeline.runner.fetch_subtitles")
-@mock.patch("shorts_clipper.pipeline.runner.GeminiProvider")
+@mock.patch("shorts_clipper.pipeline.runner.get_provider")
 @mock.patch("shorts_clipper.pipeline.runner.download_audio")
 @mock.patch("shorts_clipper.pipeline.runner.transcribe_clip")
 @mock.patch("shorts_clipper.pipeline.runner.download_clip")
