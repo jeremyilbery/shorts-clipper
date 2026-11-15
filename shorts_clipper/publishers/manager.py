@@ -20,6 +20,9 @@ log = logging.getLogger(__name__)
 class PublishingEngine:
     """Core engine responsible for multi-platform publishing."""
 
+    # Platforms that receive the file itself rather than a signed R2 URL.
+    DIRECT_UPLOAD_PLATFORMS = frozenset({"youtube"})
+
     def __init__(
         self,
         max_retries: int = 3,
@@ -80,7 +83,11 @@ class PublishingEngine:
         r2_storage = None
         settings = Settings.from_env()
 
-        for attempt in range(1, self.max_retries + 1):
+        # Only platforms that pull the video from a public URL (e.g. Instagram) need R2;
+        # YouTube uploads the file directly, so it must not be blocked by missing R2 setup.
+        needs_url = [p for p in publishers if p not in self.DIRECT_UPLOAD_PLATFORMS]
+
+        for attempt in range(1, self.max_retries + 1 if needs_url else 1):
             try:
                 r2_storage = R2Storage(settings)
                 if attempt > 1:
@@ -96,14 +103,16 @@ class PublishingEngine:
                     time.sleep(wait_time)
                 else:
                     log.error(f"❌ R2 Upload failed after {self.max_retries} attempts: {e}")
-                    for p in publishers:
+                    for p in needs_url:
                         results[p] = PublishResult(
                             platform=p,
                             success=False,
                             error_message=f"R2 Upload failed: {e}",
                         )
-                    self._generate_manifest(video_path, metadata, results)
-                    return results
+                        publishers.pop(p)
+                    if not publishers:
+                        self._generate_manifest(video_path, metadata, results)
+                        return results
 
         def publish_to_platform(platform_name: str, publisher) -> PublishResult:
             result = None

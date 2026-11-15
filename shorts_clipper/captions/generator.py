@@ -38,7 +38,22 @@ def hex_to_ass_color(hex_str: str) -> str:
     return "&H00FFFFFF&"
 
 
-def _ass_header(style_name: str = "default") -> str:
+def _landscape_style(style_def: str) -> str:
+    """Adapt a portrait (1080x1920) style line for a 1920x1080 frame.
+
+    Fonts are scaled down a little and the bottom margin is reduced, so captions sit low
+    on the wide frame instead of covering the speakers.
+    """
+    fields = style_def.split(",")
+    try:
+        fields[2] = str(round(float(fields[2]) * 0.8))  # Fontsize
+        fields[21] = "60"  # MarginV
+    except (IndexError, ValueError):
+        return style_def
+    return ",".join(fields)
+
+
+def _ass_header(style_name: str = "default", landscape: bool = False) -> str:
     """Build the ASS subtitle file header with custom style overrides."""
     style_format = (
         "Name, Fontname, Fontsize, PrimaryColour, SecondaryColour,"
@@ -114,13 +129,19 @@ def _ass_header(style_name: str = "default") -> str:
             "-1,0,0,0,100,100,0,0,1,2.5,1,2,40,40,180,1"
         )
 
+    if landscape:
+        style_def = _landscape_style(style_def)
+        play_res_x, play_res_y = 1920, 1080
+    else:
+        play_res_x, play_res_y = 1080, 1920
+
     event_format = "Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
     return "\n".join(
         [
             "[Script Info]",
             "ScriptType: v4.00+",
-            "PlayResX: 1080",
-            "PlayResY: 1920",
+            f"PlayResX: {play_res_x}",
+            f"PlayResY: {play_res_y}",
             "ScaledBorderAndShadow: yes",
             "",
             "[V4+ Styles]",
@@ -228,12 +249,13 @@ def generate_ass_file(
     output_path: str | Path,
     pacing: float = 1.0,
     style_name: str = "default",
+    landscape: bool = False,
 ) -> Path:
     """Generate an ASS subtitle file from transcript segments."""
     out = Path(output_path)
     chunks = _build_ass_chunks(segments, start_offset, pacing=pacing)
 
-    lines = [_ass_header(style_name=style_name), ""]
+    lines = [_ass_header(style_name=style_name, landscape=landscape), ""]
 
     highlight_colors = [
         "&H00E6E64D&",  # Soft Cyan (BGR)
@@ -309,6 +331,7 @@ def burn_subtitles(
     pacing: float = 1.0,
     video_codec: str = "libx264",
     style_name: str = "default",
+    landscape: bool = False,
 ) -> Path:
     """
     Burn subtitles into a video using FFmpeg's native ASS filter.
@@ -337,7 +360,14 @@ def burn_subtitles(
 
     with tempfile.TemporaryDirectory(prefix="ass_") as tmp:
         ass_path = Path(tmp) / "subs.ass"
-        generate_ass_file(segments, start_offset, ass_path, pacing=pacing, style_name=style_name)
+        generate_ass_file(
+            segments,
+            start_offset,
+            ass_path,
+            pacing=pacing,
+            style_name=style_name,
+            landscape=landscape,
+        )
 
         # FFmpeg ASS filter — libass renders directly during encode
         # On Linux the path needs colons escaped

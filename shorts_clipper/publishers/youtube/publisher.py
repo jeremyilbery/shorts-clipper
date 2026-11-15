@@ -6,7 +6,7 @@ from pathlib import Path
 from ..base import Publisher
 from ..models import ClipMetadata, PublishResult
 from .auth import get_youtube_service
-from .uploader import upload_short
+from .uploader import set_thumbnail, upload_short
 
 log = logging.getLogger(__name__)
 
@@ -39,10 +39,13 @@ class YouTubePublisher(Publisher):
                 privacy_status=metadata.privacy_status,
                 progress_callback=progress_callback,
             )
+            if video_id and metadata.thumbnail_path:
+                set_thumbnail(video_id, metadata.thumbnail_path)
             return PublishResult(
                 platform=self.platform_name,
                 success=True,
-                url=f"https://youtube.com/shorts/{video_id}" if video_id else None,
+                # youtu.be works for both Shorts and long-form uploads.
+                url=f"https://youtu.be/{video_id}" if video_id else None,
                 platform_id=video_id,
                 published_at=datetime.utcnow().isoformat() + "Z",
             )

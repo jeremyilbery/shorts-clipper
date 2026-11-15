@@ -18,10 +18,27 @@ log = logging.getLogger(__name__)
 _TARGET_W = 1080
 _TARGET_H = 1920
 
+# "landscape" layout: keep the full 16:9 picture for long-form uploads.
+_LANDSCAPE_W = 1920
+_LANDSCAPE_H = 1080
+
+
+def _target_size(layout: str) -> tuple[int, int]:
+    if layout == "landscape":
+        return _LANDSCAPE_W, _LANDSCAPE_H
+    return _TARGET_W, _TARGET_H
+
 
 def _build_crop_filter(src_w: int, src_h: int, layout: str) -> str:
     """Return an FFmpeg -vf / -filter_complex string for the requested layout."""
     src_ratio = src_w / src_h
+
+    if layout == "landscape":
+        # No crop: fit the whole frame into 1920x1080, letterboxing if the source isn't 16:9.
+        return (
+            f"scale={_LANDSCAPE_W}:{_LANDSCAPE_H}:force_original_aspect_ratio=decrease,"
+            f"pad={_LANDSCAPE_W}:{_LANDSCAPE_H}:(ow-iw)/2:(oh-ih)/2,setsar=1"
+        )
 
     if layout == "crop_left":
         scale_h = _TARGET_H
@@ -84,13 +101,15 @@ def process_to_vertical(
     meta = get_video_metadata(str(input_path))
     vf = _build_crop_filter(meta.width, meta.height, layout)
 
+    out_w, out_h = _target_size(layout)
     log.info(
-        "\n--- VERTICAL CROP [%s] %dx%d → %dx%d ---",
+        "\n--- %s [%s] %dx%d → %dx%d ---",
+        "LANDSCAPE SCALE" if layout == "landscape" else "VERTICAL CROP",
         layout,
         meta.width,
         meta.height,
-        _TARGET_W,
-        _TARGET_H,
+        out_w,
+        out_h,
     )
 
     cmd = [

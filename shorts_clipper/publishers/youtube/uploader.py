@@ -61,3 +61,28 @@ def upload_short(
     video_id = response.get("id")
     log.info("✅ Upload Complete! Video ID: %s", video_id)
     return video_id
+
+
+def set_thumbnail(video_id: str, thumbnail_path: Path | str) -> bool:
+    """Set a custom thumbnail on an uploaded video. Never raises.
+
+    YouTube only allows custom thumbnails on channels that have been phone-verified;
+    otherwise the API refuses and YouTube's auto-picked frame is kept.
+    """
+    from googleapiclient.http import MediaFileUpload
+
+    try:
+        youtube = get_youtube_service()
+        youtube.thumbnails().set(
+            videoId=video_id,
+            media_body=MediaFileUpload(str(thumbnail_path), mimetype="image/jpeg"),
+        ).execute()
+        log.info("🖼  Thumbnail set for %s", video_id)
+        return True
+    except Exception as exc:
+        log.warning(
+            "Could not set thumbnail for %s (channel may need phone verification): %s",
+            video_id,
+            exc,
+        )
+        return False

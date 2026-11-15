@@ -19,8 +19,12 @@ from pathlib import Path
 from shorts_clipper.core.logging import configure_logging
 from shorts_clipper.core.queue import JobQueue, JobStatus
 from shorts_clipper.core.settings import Settings
+from shorts_clipper.core.watchdog import check_watchdog_channels
 from shorts_clipper.pipeline.runner import run, run_autopilot
 from shorts_clipper.providers import get_provider
+from shorts_clipper.publishers import retry_queue
+
+RETRY_CHECK_INTERVAL_S = 600
 
 # Setup logging
 configure_logging("INFO")
@@ -80,95 +84,6 @@ class JobCancelledError(Exception):
     pass
 
 
-def check_watchdog_channels(job_queue: JobQueue) -> None:
-    """Check all monitored channels in outputs/watchdog.json for new uploads."""
-    watchdog_path = Path("outputs/watchdog.json")
-    if not watchdog_path.exists():
-        # Create empty setup if missing
-        watchdog_path.parent.mkdir(parents=True, exist_ok=True)
-        default_data = {"enabled": False, "channels": [], "last_poll_time": 0.0}
-        watchdog_path.write_text(json.dumps(default_data, indent=2), encoding="utf-8")
-        return
-
-    try:
-        data = json.loads(watchdog_path.read_text(encoding="utf-8"))
-        if not data.get("enabled", False):
-            return
-
-        # Poll limit: once every 10 minutes
-        last_poll = data.get("last_poll_time", 0.0)
-        if time.time() - last_poll < 600:
-            return
-
-        data["last_poll_time"] = time.time()
-        watchdog_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-
-        logger.info("📡 Watchdog: Polling monitored channels for new uploads...")
-        channels = data.get("channels", [])
-        changed = False
-
-        for ch in channels:
-            url = ch.get("url")
-            last_seen = ch.get("last_seen_video")
-            if not url:
-                continue
-
-            # Fetch latest video id via yt-dlp
-            from shorts_clipper.downloader.yt_dlp import get_base_yt_dlp_cmd
-
-            cmd = get_base_yt_dlp_cmd()
-
-            cmd.extend(
-                [
-                    "--playlist-end",
-                    "1",
-                    "--dump-json",
-                    "--socket-timeout",
-                    "10",
-                    f"{url}/videos",
-                ]
-            )
-            try:
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-                if res.returncode == 0 and res.stdout.strip():
-                    try:
-                        video_data = json.loads(res.stdout.splitlines()[0])
-                        video_id = video_data.get("id")
-                        video_url = f"https://www.youtube.com/watch?v={video_id}"
-
-                        if video_id and video_id != last_seen:
-                            logger.info(
-                                "🔔 Watchdog: New video detected on channel %s: %s",
-                                ch.get("name"),
-                                video_url,
-                            )
-
-                            # Create autopilot job
-                            job_queue.create(
-                                "autopilot",
-                                {
-                                    "niche": "auto_watchdog",
-                                    "url": video_url,
-                                    "count": 1,
-                                    "upload": True,
-                                    "scout_duration": "today",
-                                },
-                            )
-
-                            ch["last_seen_video"] = video_id
-                            changed = True
-                    except Exception as inner:
-                        logger.error("Watchdog parse error for %s: %s", url, inner)
-            except Exception as cmd_err:
-                logger.error("Watchdog subprocess error for %s: %s", url, cmd_err)
-
-        if changed:
-            watchdog_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-
-    except Exception as e:
-        logger.error("Watchdog execution failed: %s", e)
-
-
 def watchdog_thread_loop() -> None:
     """Thread running the channel watchdog check every 60 seconds."""
     logger.info("📡 Watchdog background thread started.")
@@ -226,12 +141,22 @@ def run_worker() -> None:
         logger.info("Resetting stuck running job to pending: %s", job.id)
         job_queue.update_status(job.id, JobStatus.PENDING, progress=0)
 
+    last_retry_check = 0.0
     while True:
         time.sleep(1.0)
 
         # Check for and claim a pending job atomically
         job = job_queue.claim_job()
         if not job:
+            # While idle, upload clips held back by yesterday's YouTube quota.
+            if time.time() - last_retry_check >= RETRY_CHECK_INTERVAL_S:
+                last_retry_check = time.time()
+                try:
+                    stats = retry_queue.process_due()
+                    if any(stats.values()):
+                        logger.info("🔁 Upload retry queue: %s", stats)
+                except Exception:
+                    logger.exception("Upload retry queue check failed")
             continue
 
         active_job_id = job.id
@@ -299,9 +224,12 @@ def run_worker() -> None:
                     payload["url"],
                     settings=settings,
                     count=payload.get("count", 1),
+                    long_count=payload.get("long_count", 0),
                     upload=payload.get("upload", False),
                     privacy=payload.get("privacy", "private"),
                     progress_callback=worker_progress,
+                    source_title=payload.get("source_title"),
+                    source_channel=payload.get("source_channel"),
                 )
                 output_paths = []
                 if isinstance(result, list):

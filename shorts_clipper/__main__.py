@@ -26,7 +26,11 @@ def _cmd_clip(args: argparse.Namespace, settings: Settings) -> int:
     from shorts_clipper.pipeline.runner import run
 
     out = Path(args.output) if args.output else None
-    count = getattr(args, "count", 1)
+    count = getattr(args, "count", None)
+    long_count = getattr(args, "long", 0) or 0
+    if count is None:
+        # Default: one short, unless only long-form clips were asked for.
+        count = 0 if long_count else 1
     upload = getattr(args, "upload", False)
 
     source_title = None
@@ -55,6 +59,7 @@ def _cmd_clip(args: argparse.Namespace, settings: Settings) -> int:
             settings=settings,
             output_path=out,
             count=count,
+            long_count=long_count,
             upload=upload,
             source_title=source_title,
             source_channel=source_channel,
@@ -173,9 +178,18 @@ def build_parser() -> argparse.ArgumentParser:
     clip_p.add_argument(
         "-c",
         "--count",
+        "--short",
+        dest="count",
         type=int,
-        default=1,
-        help="Number of viral clips to extract (default: 1)",
+        default=None,
+        help="Number of vertical shorts (20-60s) to extract "
+        "(default: 1, or 0 when --long is given)",
+    )
+    clip_p.add_argument(
+        "--long",
+        type=int,
+        default=0,
+        help="Number of long-form 16:9 clips (8-12 min) to extract (default: 0)",
     )
     clip_p.add_argument(
         "--upload",

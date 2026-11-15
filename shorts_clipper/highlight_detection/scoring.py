@@ -109,16 +109,63 @@ class SemanticCandidateGenerator:
         self.settings = Settings.from_env()
 
     def generate_candidate(
-        self, segments: list[TranscriptSegment]
+        self,
+        segments: list[TranscriptSegment],
+        *,
+        min_seconds: float = 20.0,
+        max_seconds: float = 60.0,
     ) -> tuple[float, list[TranscriptSegment], str]:
         """Identifies the best semantic window and returns its generation score, the window, and reasoning."""
+        return self.generate_candidates(
+            segments, count=1, min_seconds=min_seconds, max_seconds=max_seconds
+        )[0]
+
+    @staticmethod
+    def _map_window(
+        segments: list[TranscriptSegment], start_t: float, end_t: float
+    ) -> list[TranscriptSegment]:
+        """Map target bounds to the closest raw segments.
+
+        Post-processing sentence snapping is handled exactly once by EditorialFinisher in runner.py.
+        """
+        start_idx = 0
+        end_idx = len(segments) - 1
+
+        for i, s in enumerate(segments):
+            if s.start >= start_t:
+                start_idx = i
+                break
+
+        for i in range(start_idx, len(segments)):
+            if segments[i].end >= end_t:
+                end_idx = i
+                break
+
+        return segments[start_idx : end_idx + 1]
+
+    def generate_candidates(
+        self,
+        segments: list[TranscriptSegment],
+        count: int = 1,
+        *,
+        min_seconds: float = 20.0,
+        max_seconds: float = 60.0,
+    ) -> list[tuple[float, list[TranscriptSegment], str]]:
+        """Identify up to ``count`` non-overlapping semantic windows, best first.
+
+        Each entry is (generation score, window, reasoning). Always returns at least one
+        entry; a failed or empty result is reported as a single zero-score entry.
+        """
         if not segments:
-            return 0.0, [], "Empty transcript"
+            return [(0.0, [], "Empty transcript")]
 
         import json
         import logging
 
         log = logging.getLogger(__name__)
+
+        count = max(1, count)
+        requested = max(3, count)
 
         full_text_parts = []
         for s in segments:
@@ -127,7 +174,10 @@ class SemanticCandidateGenerator:
 
         prompt = f"""
 You are an Attention Prediction Engine.
-Analyze the following transcript and identify the TOP 3 BEST highlights (between 20s and 60s).
+Analyze the following transcript and identify the TOP {requested} BEST highlights.
+Each highlight MUST be between {min_seconds:.0f}s and {max_seconds:.0f}s long (end_time - start_time).
+A highlight must be a complete, self-contained segment that makes sense on its own.
+Highlights must NOT overlap in time.
 Evaluate based on true semantics: conflict, surprise, stakes, emotion, transformation, curiosity, tension, and resolution.
 Do NOT rely on simple keywords. Look for story progression and emotional peaks.
 
@@ -161,43 +211,45 @@ Return ONLY valid JSON in this format:
             res = json.loads(response.text)
             highlights = res.get("highlights", [])
             if not highlights:
-                return 0.0, [], "No highlights returned"
+                return [(0.0, [], "No highlights returned")]
 
-            # Sort highlights by score descending and pick the best one
+            # Best first; greedily keep highlights that don't overlap an already-chosen one.
             highlights.sort(key=lambda x: x.get("score", 0), reverse=True)
-            best = highlights[0]
+            results: list[tuple[float, list[TranscriptSegment], str]] = []
+            taken: list[tuple[float, float]] = []
 
-            start_t = best["start_time"]
-            end_t = best["end_time"]
-            score = best["score"]
-            reasoning = f"Signals: {', '.join(best['signals_triggered'])}. Why it won: {best['why_it_won']}."
-
-            # Simply map the target bounds to the closest raw segments.
-            # Post-processing sentence snapping will be handled exactly once by EditorialFinisher in runner.py.
-            start_idx = 0
-            end_idx = len(segments) - 1
-
-            for i, s in enumerate(segments):
-                if s.start >= start_t:
-                    start_idx = i
+            for h in highlights:
+                if len(results) >= count:
                     break
+                start_t = float(h["start_time"])
+                end_t = float(h["end_time"])
+                if any(start_t < t_end and end_t > t_start for t_start, t_end in taken):
+                    continue
 
-            for i in range(start_idx, len(segments)):
-                if segments[i].end >= end_t:
-                    end_idx = i
-                    break
+                window = self._map_window(segments, start_t, end_t)
+                if not window:
+                    continue
 
-            best_window = segments[start_idx : end_idx + 1]
+                signals = ", ".join(h.get("signals_triggered", []))
+                reasoning = f"Signals: {signals}. Why it won: {h.get('why_it_won', '')}."
+                reasoning += (
+                    f" | Raw Semantic Window Duration: {window[-1].end - window[0].start:.1f}s"
+                )
+                results.append((float(h.get("score", 0)), window, reasoning))
+                taken.append((start_t, end_t))
 
-            if not best_window:
-                return 0.0, [], "Failed to map window"
+            if not results:
+                return [(0.0, [], "Failed to map window")]
 
-            final_dur = best_window[-1].end - best_window[0].start
-            reasoning += f" | Raw Semantic Window Duration: {final_dur:.1f}s"
-
-            return float(score), best_window, reasoning
+            if len(results) < count:
+                log.warning(
+                    "Requested %d highlights but only %d non-overlapping ones were found.",
+                    count,
+                    len(results),
+                )
+            return results
 
         except Exception as e:
             log.warning("Semantic scoring failed: %s", e)
             # True fallback (if offline)
-            return 0.0, segments[:10], f"Failed semantic scoring: {e}"
+            return [(0.0, segments[:10], f"Failed semantic scoring: {e}")]

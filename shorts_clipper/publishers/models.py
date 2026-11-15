@@ -10,6 +10,7 @@ class ClipMetadata:
     tags: list[str] = field(default_factory=list)
     privacy_status: str = "private"
     language: str = "en"
+    thumbnail_path: str | None = None
 
 
 @dataclass

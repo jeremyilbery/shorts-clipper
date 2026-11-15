@@ -18,11 +18,13 @@ import logging
 import tempfile
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 from shorts_clipper.captions.generator import burn_subtitles
 from shorts_clipper.core.exceptions import MediaProcessingError
 from shorts_clipper.core.logging import configure_logging
+from shorts_clipper.core.models import ClipWindow
 from shorts_clipper.core.settings import Settings
 from shorts_clipper.downloader.yt_dlp import (
     download_audio,
@@ -30,8 +32,9 @@ from shorts_clipper.downloader.yt_dlp import (
     fetch_subtitles,
 )
 from shorts_clipper.pipeline.finisher import EditorialFinisher
+from shorts_clipper.pipeline.profiles import LONG, SHORT, ClipProfile, fit_window
 from shorts_clipper.providers import get_provider
-from shorts_clipper.publishers import ClipMetadata, PublishingEngine
+from shorts_clipper.publishers import ClipMetadata, PublishingEngine, retry_queue
 from shorts_clipper.rendering.crop import process_to_vertical
 from shorts_clipper.scout.trending import get_trending_link
 from shorts_clipper.transcription.whisper import transcribe_clip
@@ -50,6 +53,7 @@ def run(
     settings: Settings | None = None,
     output_path: Path | None = None,
     count: int = 1,
+    long_count: int = 0,
     upload: bool = False,
     platforms: list[str] | None = None,
     privacy: str = "private",
@@ -71,10 +75,12 @@ def run(
         settings:    App settings (loaded from .env if not provided).
         output_path: Override output path (default: outputs/clip_TIMESTAMP.mp4).
                      If count > 1, files are saved as PATH_1.mp4, PATH_2.mp4, etc.
-        count:       Number of clips to extract.
+        count:       Number of vertical shorts to extract (see profiles.SHORT).
+        long_count:  Number of long-form 16:9 clips to extract (see profiles.LONG).
 
     Returns:
-        Path to the final output video if count == 1, or list of Paths if count > 1.
+        Path to the final output video if one clip was requested in total, otherwise a
+        list of Paths.
 
     Raises:
         MediaProcessingError: If any stage of the pipeline fails.
@@ -86,7 +92,14 @@ def run(
         platforms = settings.publish_platforms
 
     configure_logging(settings.log_level)
-    log.info("🚀 PIPELINE START: %s (extracting %d clip(s))", url, count)
+    count = max(0, count)
+    long_count = max(0, long_count)
+    total_requested = count + long_count
+    if total_requested == 0:
+        raise MediaProcessingError("No clips requested (count and long_count are both 0).")
+    log.info(
+        "🚀 PIPELINE START: %s (extracting %d short(s), %d long-form)", url, count, long_count
+    )
 
     settings.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -104,8 +117,10 @@ def run(
             if preselected_clips:
                 clips = preselected_clips[:count]
                 log.info("🔥 Using %d pre-selected clips provided by coordinator!", len(clips))
+            # Profile for each entry in `clips` (pre-selected clips are always shorts).
+            clip_profiles: list[ClipProfile] = [SHORT] * len(clips)
 
-            if len(clips) < count:
+            if len(clips) < count or long_count > 0:
                 # ── PASS 1: ROUGH TRANSCRIPT FOR AI SELECTION ────────────────
                 log.info("\n--- PASS 1: ROUGH TRANSCRIPT FOR AI SELECTION ---")
                 if progress_callback:
@@ -121,31 +136,47 @@ def run(
                     rough_segments = transcribe_clip(audio_path)
 
                 from shorts_clipper.attention.engine import SimulationEngine
-                from shorts_clipper.core.models import ClipWindow
                 from shorts_clipper.highlight_detection.scoring import SemanticCandidateGenerator
 
                 try:
                     log.info("Generating semantic candidates")
                     generator = SemanticCandidateGenerator()
-                    candidate_generation_score, best_local_window, reasoning = (
-                        generator.generate_candidate(rough_segments)
-                    )
+                    # (profile, score, window, reasoning) for every clip still to be made.
+                    candidates: list[tuple[ClipProfile, float, list, str]] = []
+                    for profile, needed in ((SHORT, count - len(clips)), (LONG, long_count)):
+                        if needed <= 0:
+                            continue
+                        log.info(
+                            "Selecting %d %s highlight(s) (%.0f–%.0fs of source)",
+                            needed,
+                            profile.kind,
+                            profile.source_min,
+                            profile.source_max,
+                        )
+                        range_kwargs = {
+                            "min_seconds": profile.source_min,
+                            "max_seconds": profile.source_max,
+                        }
+                        if needed > 1:
+                            found = generator.generate_candidates(
+                                rough_segments, count=needed, **range_kwargs
+                            )
+                        else:
+                            found = [generator.generate_candidate(rough_segments, **range_kwargs)]
+                        found = [c for c in found if c[1]]
+                        if len(found) < needed:
+                            log.warning(
+                                "Only %d of %d requested %s highlights found.",
+                                len(found),
+                                needed,
+                                profile.kind,
+                            )
+                        candidates.extend((profile, *c) for c in found)
 
-                    if not best_local_window:
+                    if not candidates:
                         raise MediaProcessingError(
                             "Semantic Candidate Generator failed to find a valid window."
                         )
-
-                    log.info("Generating counterfactual variants")
-                    sim_engine = SimulationEngine()
-                    log.info("Running attention simulation")
-                    sim_result = sim_engine.optimize_clip(best_local_window)
-
-                    log.info("Selecting optimal narrative")
-                    winner_variant = next(
-                        (v for v in sim_result.variants if v.variant_id == sim_result.winner_id),
-                        sim_result.base_variant,
-                    )
 
                     # Log artifacts
                     from dataclasses import asdict
@@ -174,9 +205,37 @@ def run(
                         except Exception:
                             return str(obj)
 
-                    run_ctx.add_decision_trace(
-                        {
-                            "video_url": url,
+                    from shorts_clipper.core.stats import get_optimizer_stats
+
+                    sim_engine = SimulationEngine()
+                    optimizer_stats = get_optimizer_stats()
+
+                    for clip_num, (
+                        profile,
+                        candidate_generation_score,
+                        best_local_window,
+                        _reasoning,
+                    ) in enumerate(candidates, len(clips) + 1):
+                        clip_id = f"clip_{clip_num}"
+                        log.info(
+                            "Generating counterfactual variants (%s, %s)", clip_id, profile.kind
+                        )
+                        log.info("Running attention simulation")
+                        sim_result = sim_engine.optimize_clip(best_local_window)
+
+                        log.info("Selecting optimal narrative")
+                        winner_variant = next(
+                            (
+                                v
+                                for v in sim_result.variants
+                                if v.variant_id == sim_result.winner_id
+                            ),
+                            sim_result.base_variant,
+                        )
+                        winner_report = sim_result.reports[sim_result.winner_id]
+
+                        trace = {
+                            "kind": profile.kind,
                             "candidate_windows": [
                                 {"start": s.start, "end": s.end} for s in best_local_window
                             ],
@@ -184,62 +243,66 @@ def run(
                             "winner_variant_id": sim_result.winner_id,
                             "winner_reason": sim_result.reason,
                             "runner_up": None,  # Could extract if needed
-                            "confidence": sim_result.reports[
-                                sim_result.winner_id
-                            ].overall_confidence,
+                            "confidence": winner_report.overall_confidence,
                         }
-                    )
+                        if clip_num == 1:
+                            # Clip 1 keeps the original top-level layout of decision_trace.json.
+                            run_ctx.add_decision_trace({"video_url": url, **trace})
+                        else:
+                            run_ctx.add_decision_trace({clip_id: trace})
 
-                    from shorts_clipper.core.stats import get_optimizer_stats
+                        optimizer_stats.record_run(
+                            sim_result.winner_id,
+                            winner_report.overall_confidence,
+                            len(sim_result.variants),
+                            sim_result.runner_up_id,
+                            sim_result.improvement_percentage,
+                        )
 
-                    optimizer_stats = get_optimizer_stats()
-                    optimizer_stats.record_run(
-                        sim_result.winner_id,
-                        sim_result.reports[sim_result.winner_id].overall_confidence,
-                        len(sim_result.variants),
-                        sim_result.runner_up_id,
-                        sim_result.improvement_percentage,
-                    )
+                        run_ctx.add_attention_report(clip_id, safe_asdict(winner_report))
+                        run_ctx.add_variant(safe_asdict(sim_result))
 
-                    run_ctx.add_attention_report(
-                        "clip_1", safe_asdict(sim_result.reports[sim_result.winner_id])
-                    )
-                    run_ctx.add_variant(safe_asdict(sim_result))
-
-                    # Score Breakdown
-                    run_ctx.add_score_breakdown(
-                        "clip_1",
-                        {
-                            "Narrative Score": candidate_generation_score,
-                            "Final Editorial Score": sim_result.reports[
-                                sim_result.winner_id
-                            ].completion_prob
-                            * 100.0,
-                            "judge_results": {
-                                k: v.score
-                                for k, v in sim_result.reports[
-                                    sim_result.winner_id
-                                ].judge_results.items()
+                        # Score Breakdown
+                        run_ctx.add_score_breakdown(
+                            clip_id,
+                            {
+                                "Narrative Score": candidate_generation_score,
+                                "Final Editorial Score": winner_report.completion_prob * 100.0,
+                                "judge_results": {
+                                    k: v.score for k, v in winner_report.judge_results.items()
+                                },
                             },
-                        },
-                    )
+                        )
 
-                    # Editorial Summary Markdown
-                    editorial_md = f"""# Editorial Decision for Clip 1
+                        # Editorial Summary Markdown
+                        editorial_md = f"""# Editorial Decision for Clip {clip_num}
 ## Why THIS clip?
 {sim_result.reason}
 
 ## Key Metrics
-- **Completion Probability:** {sim_result.reports[sim_result.winner_id].completion_prob:.2f}
-- **Scroll Stop Probability:** {sim_result.reports[sim_result.winner_id].scroll_stop_prob:.2f}
-- **Payoff Strength:** {sim_result.reports[sim_result.winner_id].payoff_strength:.2f}
+- **Completion Probability:** {winner_report.completion_prob:.2f}
+- **Scroll Stop Probability:** {winner_report.scroll_stop_prob:.2f}
+- **Payoff Strength:** {winner_report.payoff_strength:.2f}
 """
-                    run_ctx.set_editorial_summary("clip_1", editorial_md)
+                        run_ctx.set_editorial_summary(clip_id, editorial_md)
 
-                    new_clip_window = ClipWindow(
-                        start=winner_variant.start_time, end=winner_variant.end_time
-                    )
-                    clips.extend([(new_clip_window, "center")])
+                        selected = ClipWindow(
+                            start=winner_variant.start_time, end=winner_variant.end_time
+                        )
+                        new_clip_window = fit_window(selected, profile)
+                        if new_clip_window != selected:
+                            log.info(
+                                "Adjusted %s window to fit %.0f–%.0fs: %.1f–%.1f → %.1f–%.1f",
+                                profile.kind,
+                                profile.source_min,
+                                profile.source_max,
+                                selected.start,
+                                selected.end,
+                                new_clip_window.start,
+                                new_clip_window.end,
+                            )
+                        clips.append((new_clip_window, profile.layout))
+                        clip_profiles.append(profile)
 
                 except Exception as exc:
                     log.error("Simulation Engine selection failed: %s", exc)
@@ -248,10 +311,12 @@ def run(
             output_paths: list[Path] = []
 
             for idx, (window, layout) in enumerate(clips, 1):
+                profile = clip_profiles[idx - 1]
                 log.info(
-                    "\n--- PROCESSING CLIP %d/%d: %.1fs → %.1fs [%s] ---",
+                    "\n--- PROCESSING CLIP %d/%d (%s): %.1fs → %.1fs [%s] ---",
                     idx,
                     len(clips),
+                    profile.kind,
                     window.start,
                     window.end,
                     layout,
@@ -259,7 +324,7 @@ def run(
 
                 # Determine output path for this specific clip
                 if output_path is not None:
-                    if count > 1:
+                    if len(clips) > 1:
                         stem = output_path.stem
                         ext = output_path.suffix
                         current_output_path = output_path.parent / f"{stem}_{idx}{ext}"
@@ -267,8 +332,12 @@ def run(
                         current_output_path = output_path
                 else:
                     log.info("Exporting optimized clip")
-                    # Write directly to the run context directory
-                    current_output_path = run_dir / "rendered_clip.mp4"
+                    # Write directly to the run context directory. With several clips each
+                    # one needs its own file, or later clips overwrite earlier ones.
+                    if len(clips) > 1:
+                        current_output_path = run_dir / f"rendered_clip_{idx}.mp4"
+                    else:
+                        current_output_path = run_dir / "rendered_clip.mp4"
 
                 clip_work_dir = work_path / f"clip_{idx}"
                 clip_work_dir.mkdir(parents=True, exist_ok=True)
@@ -305,6 +374,27 @@ def run(
                     final_window.start,
                     window.end - buffered_start,
                     final_window.end,
+                )
+
+                # Sentence snapping can nudge the length outside the profile's range. Too short:
+                # snap again from a later target end. Too long: hard cut at the maximum.
+                if final_window.end - final_window.start < profile.source_min:
+                    final_window = finisher.snap_boundaries(
+                        final_window.start,
+                        final_window.start + profile.source_min + 1.0,
+                        precision_segments,
+                    )
+                if final_window.end - final_window.start > profile.source_max:
+                    final_window = ClipWindow(
+                        start=final_window.start, end=final_window.start + profile.source_max
+                    )
+                log.info(
+                    "Final %s length: %.1fs of source → %.1fs finished (target %.0f–%.0fs)",
+                    profile.kind,
+                    final_window.end - final_window.start,
+                    (final_window.end - final_window.start) / profile.pacing,
+                    profile.min_seconds,
+                    profile.max_seconds,
                 )
 
                 # Shift timestamps in precision_segments to account for trimming
@@ -365,8 +455,9 @@ def run(
                     precision_segments,
                     start_offset=0.0,
                     output_path=ass_artifact_path,
-                    pacing=1.15,
+                    pacing=profile.pacing,
                     style_name=settings.subtitle_style,
+                    landscape=profile.landscape,
                 )
 
                 burn_subtitles(
@@ -374,10 +465,11 @@ def run(
                     precision_segments,
                     start_offset=0.0,  # precision segments are relative to micro_clip
                     output_path=current_output_path,
-                    pacing=1.15,
+                    pacing=profile.pacing,
                     video_codec=settings.video_codec,
                     preset=settings.video_preset,
                     style_name=settings.subtitle_style,
+                    landscape=profile.landscape,
                 )
 
                 try:
@@ -389,6 +481,7 @@ def run(
 
                 # Generate viral metadata using Gemini and write sidecar .json file
                 meta = {
+                    "kind": profile.kind,
                     "title": None,
                     "description": None,
                     "tags": [],
@@ -403,7 +496,10 @@ def run(
                 try:
                     provider = get_provider(settings)
                     ai_meta = provider.generate_clip_metadata(
-                        precision_segments, source_title=s_title, source_channel=s_channel
+                        precision_segments,
+                        source_title=s_title,
+                        source_channel=s_channel,
+                        kind=profile.kind,
                     )
                     meta["title"] = ai_meta["title"]
                     meta["description"] = ai_meta["description"]
@@ -447,8 +543,9 @@ def run(
                 # Copy artifacts to run directory
                 import shutil
 
-                if current_output_path.exists():
-                    shutil.copy2(current_output_path, run_dir / f"rendered_clip_{idx}.mp4")
+                artifact_clip_path = run_dir / f"rendered_clip_{idx}.mp4"
+                if current_output_path.exists() and current_output_path != artifact_clip_path:
+                    shutil.copy2(current_output_path, artifact_clip_path)
                 thumb_path = current_output_path.with_suffix(".jpg")
                 if thumb_path.exists():
                     shutil.copy2(thumb_path, run_dir / f"thumbnail_{idx}.jpg")
@@ -460,10 +557,22 @@ def run(
                 output_paths.append(current_output_path)
                 log.info("✅ Clip %d ready at: %s", idx, current_output_path)
 
-                if upload and platforms:
+                # Long-form clips are too long for Reels/Shorts-only platforms: YouTube only.
+                clip_platforms = (
+                    [p for p in platforms if p == "youtube"] if profile.kind == "long" else platforms
+                )
+                if upload and platforms and not clip_platforms:
+                    log.info(
+                        "Skipping upload of %s clip %d: none of %s accept long-form video.",
+                        profile.kind,
+                        idx,
+                        platforms,
+                    )
+
+                if upload and clip_platforms:
                     if progress_callback:
                         progress_callback(95)
-                    log.info("Publishing Clip %d to platforms: %s", idx, platforms)
+                    log.info("Publishing Clip %d to platforms: %s", idx, clip_platforms)
                     try:
                         meta["publish_status"] = "uploading"
                         json_path.write_text(
@@ -487,19 +596,59 @@ def run(
                             )
                             continue
 
+                        # Queue from the run directory: it is kept, unlike temp outputs.
+                        run_thumb = run_dir / f"thumbnail_{idx}.jpg"
+                        if run_thumb.exists():
+                            thumb_path = run_thumb
                         clip_metadata = ClipMetadata(
                             title=meta["title"],
                             description=meta["description"],
                             tags=meta.get("tags", ["shorts"]),
                             privacy_status=privacy,
+                            thumbnail_path=str(thumb_path) if thumb_path.exists() else None,
+                        )
+                        queue_video = (
+                            artifact_clip_path
+                            if artifact_clip_path.exists()
+                            else current_output_path
                         )
 
-                        engine = PublishingEngine()
-                        publish_results = engine.publish(
-                            video_path=current_output_path,
-                            metadata=clip_metadata,
-                            platforms=platforms,
-                        )
+                        def _defer_youtube(reason: str | None) -> None:
+                            retry_at = retry_queue.enqueue(
+                                queue_video,
+                                clip_metadata,
+                                platform="youtube",
+                                sidecar_path=json_path,
+                                reason=reason,
+                            )
+                            meta["retry_after"] = datetime.fromtimestamp(retry_at).isoformat(
+                                timespec="minutes"
+                            )
+
+                        try_now = list(clip_platforms)
+                        deferred: list[str] = []
+                        if "youtube" in try_now and retry_queue.blocked_until():
+                            # Daily limit already used up: don't spend a failing call on it.
+                            try_now.remove("youtube")
+                            deferred.append("youtube")
+                            _defer_youtube("YouTube daily upload limit reached earlier today.")
+
+                        publish_results = {}
+                        if try_now:
+                            engine = PublishingEngine()
+                            publish_results = engine.publish(
+                                video_path=current_output_path,
+                                metadata=clip_metadata,
+                                platforms=try_now,
+                            )
+
+                        yt = publish_results.get("youtube")
+                        if yt and not yt.success and retry_queue.is_daily_limit_error(
+                            yt.error_message
+                        ):
+                            del publish_results["youtube"]
+                            deferred.append("youtube")
+                            _defer_youtube(yt.error_message)
 
                         # Update metadata JSON with results
                         meta["publish_results"] = {
@@ -513,7 +662,9 @@ def run(
                         }
 
                         successes = [r for r in publish_results.values() if r.success]
-                        if len(successes) == len(platforms):
+                        if deferred:
+                            meta["publish_status"] = "queued_retry"
+                        elif len(successes) == len(clip_platforms):
                             meta["publish_status"] = "success"
                         elif len(successes) > 0:
                             meta["publish_status"] = "partial_success"
@@ -545,7 +696,9 @@ def run(
     run_ctx.add_pipeline_metrics(
         {
             "url": url,
-            "count_requested": count,
+            "count_requested": total_requested,
+            "short_requested": count,
+            "long_requested": long_count,
             "count_generated": len(output_paths),
             "job_status": "SUCCESS" if output_paths else "FAILED",
         }
@@ -555,7 +708,7 @@ def run(
     run_ctx.export_all()
     run_ctx.verify_run()
 
-    if count == 1:
+    if total_requested == 1 and output_paths:
         log.info("\n✅ SUCCESS — Single clip ready at: %s", output_paths[0])
         return output_paths[0]
 

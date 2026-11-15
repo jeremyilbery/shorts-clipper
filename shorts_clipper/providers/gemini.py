@@ -1256,15 +1256,20 @@ class GeminiProvider(HighlightProvider):
         segments: Sequence[TranscriptSegment],
         source_title: str = "",
         source_channel: str = "",
+        kind: str = "short",
     ) -> dict:
         """Generate production-grade viral metadata for a clip using Gemini.
 
         Generates 5 candidate titles, scores them, and selects the best.
         Generates a keyword-rich description with hashtags.
+        ``kind="long"`` switches to long-form YouTube metadata with chapters.
 
         Raises:
             ProviderError: If metadata generation fails completely.
         """
+        if kind == "long":
+            return self._generate_long_clip_metadata(segments, source_title, source_channel)
+
         transcript_text = format_transcript(segments)
         import datetime
 
@@ -1436,3 +1441,204 @@ Return ONLY valid JSON. No markdown. No commentary.
             "description": description,
             "tags": tags,
         }
+
+    def _generate_long_clip_metadata(
+        self,
+        segments: Sequence[TranscriptSegment],
+        source_title: str = "",
+        source_channel: str = "",
+    ) -> dict:
+        """Long-form (regular YouTube video) metadata: search-led title, full description, chapters."""
+        import datetime
+
+        transcript_text = format_transcript(segments)
+        duration = max((s.end for s in segments), default=0.0)
+        current_year = datetime.datetime.now().year
+
+        prompt = f"""\
+SYSTEM ROLE
+
+You are a YouTube SEO strategist for long-form podcast clips (8-12 minute videos).
+These are regular YouTube videos, NOT Shorts. Viewers find them through YouTube search,
+suggested videos and the home feed, so titles must be both searchable and clickable.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SOURCE CONTEXT
+Original Video Title: {source_title}
+Original Channel: {source_channel}
+Current Year: {current_year}
+Clip Length: {duration:.0f} seconds
+
+Do not hallucinate dates, names or facts that are not in the transcript or source context.
+Describe what people SAY as their claims or opinions; do not present disputed claims as fact.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TRANSCRIPT (timestamps are seconds from the start of this clip)
+
+{transcript_text}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TITLE
+
+Generate exactly 5 candidate titles, score each 0-100, and select the best.
+* 50-70 characters, never more than 100
+* Put the main search keyword (person, show or topic) in the first half
+* Specific and curiosity-driven, but must accurately reflect the clip; no clickbait the clip doesn't pay off
+* No hashtags in the title, and never use #shorts
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+DESCRIPTION
+
+Write a description of 600-1200 characters:
+* First 150 characters: a hook that includes the main keyword (this shows in search results)
+* Then 2-3 short paragraphs summarising what is discussed, with 4-6 searchable keywords used naturally
+* Credit the original show/channel by name
+* A soft call to action (subscribe / comment)
+* End with 3 relevant hashtags on their own line (no #shorts)
+* Do NOT include chapters or timestamps in the description; return them separately
+* Do NOT mention any tool or that it was generated
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CHAPTERS
+
+Split the clip into 4-8 chapters at natural topic changes.
+* The first chapter starts at 0
+* Each chapter is at least 30 seconds long
+* Chapter titles: 2-6 words, descriptive and keyword-rich
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TAGS
+
+Generate 10-15 tags: the people, the show, the specific topics discussed, and 2-3 broader
+search phrases people would type. No generic filler.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+OUTPUT FORMAT
+
+Return ONLY valid JSON. No markdown. No commentary.
+
+{{
+  "candidates": [{{"title": "...", "total": 0}}],
+  "selected_title": "...",
+  "description": "...",
+  "chapters": [{{"start_seconds": 0, "title": "..."}}],
+  "tags": ["tag1", "tag2"]
+}}
+"""
+        log.info("🧠 Generating long-form metadata (title, description, chapters)...")
+        response = self.generate_content(prompt)
+        raw = response.text.strip()
+
+        json_str = raw
+        json_match = re.search(r"```(?:json)?(.*?)```", raw, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1).strip()
+        try:
+            data = json.loads(json_str)
+            if not isinstance(data, dict):
+                raise ValueError(f"Expected dict, got {type(data)}")
+        except Exception as exc:
+            log.error("Gemini returned unparseable long-form metadata JSON: %r", raw)
+            raise ProviderError(f"Metadata JSON parse failed: {raw!r}") from exc
+
+        title = str(data.get("selected_title", "")).strip()
+        if not title and data.get("candidates"):
+            best = max(data["candidates"], key=lambda c: c.get("total", 0))
+            title = str(best.get("title", "")).strip()
+        title = title.strip('"').replace("#shorts", "").replace("#Shorts", "").strip()
+        title = title[:100].rstrip()
+
+        description = str(data.get("description", "")).strip()
+        if not title:
+            raise ProviderError("Gemini returned empty title in long-form metadata response.")
+        if not description:
+            raise ProviderError(
+                "Gemini returned empty description in long-form metadata response."
+            )
+
+        chapters = format_chapters(data.get("chapters") or [], duration)
+        if chapters:
+            description = f"{description}\n\nChapters:\n{chapters}"
+        description = description[:5000]
+
+        tags = limit_tags([str(t) for t in (data.get("tags") or [])]) or ["podcast"]
+
+        log.info("✅ Long-form metadata generated — Title: %s", title)
+        log.info("   Chapters: %d", chapters.count("\n") + 1 if chapters else 0)
+        log.info("   Tags: %s", tags)
+
+        return {
+            "title": title,
+            "description": description,
+            "tags": tags,
+        }
+
+
+def _fmt_timestamp(seconds: float) -> str:
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def format_chapters(chapters: list, duration: float, min_gap: float = 10.0) -> str:
+    """Turn model chapter suggestions into a YouTube chapter list, or "" if unusable.
+
+    YouTube only shows chapters when the list starts at 0:00, has at least 3 entries and
+    each chapter is at least 10 seconds long. Invalid entries are dropped rather than failing.
+    """
+    parsed: list[tuple[float, str]] = []
+    for ch in chapters:
+        if not isinstance(ch, dict):
+            continue
+        try:
+            start = float(ch.get("start_seconds", -1))
+        except (TypeError, ValueError):
+            continue
+        name = str(ch.get("title", "")).strip()
+        if start < 0 or not name or (duration and start > duration - min_gap):
+            continue
+        parsed.append((start, name))
+
+    parsed.sort()
+    if not parsed:
+        return ""
+    # The first chapter must be at 0:00.
+    parsed[0] = (0.0, parsed[0][1])
+
+    kept: list[tuple[float, str]] = []
+    for start, name in parsed:
+        if kept and start - kept[-1][0] < min_gap:
+            continue
+        kept.append((start, name))
+
+    if len(kept) < 3:
+        return ""
+    return "\n".join(f"{_fmt_timestamp(s)} {n}" for s, n in kept)
+
+
+def limit_tags(tags: list[str], max_total_chars: int = 450) -> list[str]:
+    """De-duplicate tags and keep them under YouTube's 500-character tag limit."""
+    out: list[str] = []
+    seen: set[str] = set()
+    total = 0
+    for tag in tags:
+        tag = tag.strip().lstrip("#").strip()
+        key = tag.lower()
+        if not tag or key in seen or key == "shorts":
+            continue
+        # YouTube counts quotes around tags that contain spaces.
+        cost = len(tag) + (2 if " " in tag else 0) + 1
+        if total + cost > max_total_chars:
+            break
+        out.append(tag)
+        seen.add(key)
+        total += cost
+    return out
