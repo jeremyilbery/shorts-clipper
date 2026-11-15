@@ -557,12 +557,16 @@ def publish_clip(
             except Exception:
                 pass
 
+            thumb = path.with_suffix(".jpg")
+            if match and not thumb.exists():
+                thumb = path.with_name(f"thumbnail_{match.group(1)}.jpg")
             clip_meta = ClipMetadata(
                 title=title,
                 description=desc,
                 tags=tags,
                 privacy_status=privacy,
                 language="en",
+                thumbnail_path=str(thumb) if thumb.exists() else None,
             )
             engine = PublishingEngine()
 
