@@ -59,13 +59,68 @@ def _load(path: Path) -> dict:
         data = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(data, dict):
             data.setdefault("pending", [])
+            data.setdefault("thumbnails", [])
             data.setdefault("blocked_until", 0.0)
             return data
     except FileNotFoundError:
         pass
     except Exception as exc:
         log.error("Could not read upload retry queue %s: %s", path, exc)
-    return {"pending": [], "blocked_until": 0.0}
+    return {"pending": [], "thumbnails": [], "blocked_until": 0.0}
+
+
+THUMBNAIL_RETRY_S = 3600
+MAX_THUMBNAIL_ATTEMPTS = 24
+
+
+def enqueue_thumbnail(
+    video_id: str,
+    thumbnail_path: Path | str,
+    *,
+    reason: str | None = None,
+    path: Path = RETRY_FILE,
+    now: float | None = None,
+) -> None:
+    """Retry setting a custom thumbnail later (YouTube rate-limits thumbnail uploads)."""
+    data = _load(path)
+    current = now if now is not None else time.time()
+    data["thumbnails"] = [t for t in data["thumbnails"] if t["video_id"] != video_id]
+    data["thumbnails"].append(
+        {
+            "video_id": video_id,
+            "path": str(Path(thumbnail_path).resolve()),
+            "retry_at": current + THUMBNAIL_RETRY_S,
+            "attempts": 0,
+            "last_error": reason,
+        }
+    )
+    _save(path, data)
+    log.warning("⏸ Thumbnail for %s queued; retrying in an hour.", video_id)
+
+
+def _process_thumbnails(
+    data: dict, current: float, set_fn: Callable[[str, Path], bool] | None
+) -> int:
+    if set_fn is None:
+        from .youtube.uploader import set_thumbnail as set_fn
+    done = 0
+    keep = []
+    for t in data["thumbnails"]:
+        if t.get("retry_at", 0) > current:
+            keep.append(t)
+            continue
+        thumb = Path(t["path"])
+        if thumb.exists() and set_fn(t["video_id"], thumb):
+            done += 1
+            continue
+        t["attempts"] = t.get("attempts", 0) + 1
+        if thumb.exists() and t["attempts"] < MAX_THUMBNAIL_ATTEMPTS:
+            t["retry_at"] = current + THUMBNAIL_RETRY_S
+            keep.append(t)
+        else:
+            log.error("Giving up on thumbnail for %s after %d tries.", t["video_id"], t["attempts"])
+    data["thumbnails"] = keep
+    return done
 
 
 def _save(path: Path, data: dict) -> None:
@@ -177,16 +232,23 @@ def process_due(
     path: Path = RETRY_FILE,
     now: float | None = None,
     publish_fn: Callable[[Path, ClipMetadata, str], PublishResult] | None = None,
+    thumbnail_fn: Callable[[str, Path], bool] | None = None,
 ) -> dict[str, int]:
-    """Upload queued clips whose retry time has passed. Safe to call often."""
+    """Upload queued clips (and thumbnails) whose retry time has passed. Safe to call often."""
     current = now if now is not None else time.time()
     data = _load(path)
+
+    thumbs_done = 0
+    if any(t.get("retry_at", 0) <= current for t in data["thumbnails"]):
+        thumbs_done = _process_thumbnails(data, current, thumbnail_fn)
+        _save(path, data)
+
     pending = data["pending"]
     if not pending or float(data.get("blocked_until") or 0.0) > current:
-        return {"uploaded": 0, "requeued": 0, "dropped": 0}
+        return {"uploaded": 0, "requeued": 0, "dropped": 0, "thumbnails": thumbs_done}
 
     publish = publish_fn or _default_publish
-    stats = {"uploaded": 0, "requeued": 0, "dropped": 0}
+    stats = {"uploaded": 0, "requeued": 0, "dropped": 0, "thumbnails": thumbs_done}
     remaining: list[dict] = []
     blocked = False
 
@@ -255,6 +317,8 @@ def process_due(
     seen = {(e["video_path"], e["platform"]) for e in pending}
     latest = _load(path)
     remaining += [e for e in latest["pending"] if (e["video_path"], e["platform"]) not in seen]
+    known_thumbs = {t["video_id"] for t in data["thumbnails"]}
+    data["thumbnails"] += [t for t in latest["thumbnails"] if t["video_id"] not in known_thumbs]
     data["blocked_until"] = max(
         float(data.get("blocked_until") or 0.0), float(latest.get("blocked_until") or 0.0)
     )

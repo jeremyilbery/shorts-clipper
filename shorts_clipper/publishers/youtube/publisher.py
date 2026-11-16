@@ -40,7 +40,11 @@ class YouTubePublisher(Publisher):
                 progress_callback=progress_callback,
             )
             if video_id and metadata.thumbnail_path:
-                set_thumbnail(video_id, metadata.thumbnail_path)
+                if not set_thumbnail(video_id, metadata.thumbnail_path):
+                    # Usually YouTube's thumbnail rate limit: try again later.
+                    from ..retry_queue import enqueue_thumbnail
+
+                    enqueue_thumbnail(video_id, metadata.thumbnail_path)
             return PublishResult(
                 platform=self.platform_name,
                 success=True,

@@ -504,6 +504,8 @@ def run(
                     meta["title"] = ai_meta["title"]
                     meta["description"] = ai_meta["description"]
                     meta["tags"] = ai_meta["tags"]
+                    if ai_meta.get("thumbnail_text"):
+                        meta["thumbnail_text"] = ai_meta["thumbnail_text"]
                     log.info("🧠 Generated metadata — Title: %s", meta["title"])
                 except Exception as meta_err:
                     log.warning(
@@ -524,6 +526,27 @@ def run(
                     meta["tags"] = fallback_meta["tags"]
                     meta["publish_error"] = None
                     log.info("[FALLBACK] title generated: %s", meta["title"])
+
+                # Long-form videos get a designed thumbnail (face + headline). YouTube
+                # ignores API thumbnails on Shorts, so those keep the plain frame.
+                if profile.kind == "long":
+                    try:
+                        from shorts_clipper.rendering.thumbnail_designer import (
+                            design_thumbnail,
+                            headline_from_title,
+                        )
+
+                        headline = meta.get("thumbnail_text") or headline_from_title(
+                            meta.get("title") or ""
+                        )
+                        meta["thumbnail_text"] = headline
+                        design_thumbnail(
+                            current_output_path,
+                            current_output_path.with_suffix(".jpg"),
+                            headline,
+                        )
+                    except Exception as design_err:
+                        log.warning("Designed thumbnail failed, keeping plain frame: %s", design_err)
 
                 # Ensure segments are preserved in the metadata sidecar
                 meta["segments"] = [

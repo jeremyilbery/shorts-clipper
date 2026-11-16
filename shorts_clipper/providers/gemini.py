@@ -1520,6 +1520,16 @@ search phrases people would type. No generic filler.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+THUMBNAIL TEXT
+
+Write the big headline printed on the thumbnail, next to the speaker's face.
+* 2-4 words, ALL CAPS, readable at phone size
+* It complements the title instead of repeating it: the emotional hook, the shocking
+  claim or the stakes (e.g. "THEY LIED TO US", "HE ALMOST DIED", "$40 MILLION GONE")
+* Must be true to the clip; no names unless the name IS the hook; no hashtags or emoji
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 OUTPUT FORMAT
 
 Return ONLY valid JSON. No markdown. No commentary.
@@ -1529,7 +1539,8 @@ Return ONLY valid JSON. No markdown. No commentary.
   "selected_title": "...",
   "description": "...",
   "chapters": [{{"start_seconds": 0, "title": "..."}}],
-  "tags": ["tag1", "tag2"]
+  "tags": ["tag1", "tag2"],
+  "thumbnail_text": "..."
 }}
 """
         log.info("🧠 Generating long-form metadata (title, description, chapters)...")
@@ -1574,11 +1585,23 @@ Return ONLY valid JSON. No markdown. No commentary.
         log.info("   Chapters: %d", chapters.count("\n") + 1 if chapters else 0)
         log.info("   Tags: %s", tags)
 
+        thumbnail_text = clean_thumbnail_text(str(data.get("thumbnail_text", "")))
+        if thumbnail_text:
+            log.info("   Thumbnail text: %s", thumbnail_text)
+
         return {
             "title": title,
             "description": description,
             "tags": tags,
+            "thumbnail_text": thumbnail_text,
         }
+
+
+def clean_thumbnail_text(text: str, max_words: int = 5) -> str:
+    """Normalise a model-written thumbnail headline: short, upper-case, no hashtags/quotes."""
+    text = re.sub(r"#\w+", "", text or "")
+    text = re.sub(r"[\"“”]", "", text).strip()
+    return " ".join(text.split()[:max_words]).upper()
 
 
 def _fmt_timestamp(seconds: float) -> str:

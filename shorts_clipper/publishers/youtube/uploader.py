@@ -81,7 +81,7 @@ def set_thumbnail(video_id: str, thumbnail_path: Path | str) -> bool:
         return True
     except Exception as exc:
         log.warning(
-            "Could not set thumbnail for %s (channel may need phone verification): %s",
+            "Could not set thumbnail for %s (rate limit, quota, or channel not phone-verified): %s",
             video_id,
             exc,
         )
