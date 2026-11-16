@@ -1,12 +1,29 @@
+x-app: &app
+  build: .
+  env_file:
+    - .env
+  restart: always
+  volumes:
+    - ./outputs:/app/outputs
+    - ./models:/app/models
+    # YouTube sign-in token lives in .cache/shorts-clipper/token.pickle
+    - ./.cache:/app/.cache
+    - ./client_secret.json:/app/client_secret.json:ro
+    # Optional: YouTube cookies for the bot check (see docs/CLOUD.md)
+    - ./secrets:/app/secrets:ro
+
 services:
-  shorts-clipper:
-    build: .
-    env_file:
-      - .env
-    volumes:
-      - ./outputs:/app/outputs
-      - ./models:/app/models
-      - ./.cache:/app/.cache
+  # Watches the channels in outputs/watchdog.json, clips and uploads new episodes.
+  worker:
+    <<: *app
+    command: ["python", "-m", "shorts_clipper.core.worker"]
+
+  # Web console (optional). Bound to localhost; reach it through an SSH tunnel.
+  web:
+    <<: *app
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
+    environment:
+      # The worker service above does the work; don't spawn a second one.
+      SHORTS_NO_AUTO_WORKER: "1"
     command: ["uvicorn", "shorts_clipper.api.server:app", "--host", "0.0.0.0", "--port", "8000"]

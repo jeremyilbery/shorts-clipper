@@ -63,6 +63,10 @@ def get_base_yt_dlp_cmd() -> list[str]:
         proxies = [p.strip() for p in proxy_str.split(",") if p.strip()]
         if proxies:
             cmd.extend(["--proxy", random.choice(proxies)])
+    # Cloud servers get YouTube's bot check; an exported cookies.txt gets past it.
+    cookies = os.environ.get("SHORTS_YTDLP_COOKIES")
+    if cookies and os.path.exists(cookies):
+        cmd.extend(["--cookies", cookies])
     return cmd
 
 

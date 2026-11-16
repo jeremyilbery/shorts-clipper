@@ -19,6 +19,8 @@ dependencies = [
   "curl-cffi>=0.15.0",
   "boto3>=1.34.0",
   "pillow>=10",
+  # Face detection for thumbnails; 5.x dropped the Haar cascades.
+  "opencv-python-headless>=4.8,<5",
 ]
 
 [project.scripts]

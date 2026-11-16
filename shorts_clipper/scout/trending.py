@@ -162,6 +162,9 @@ def _get_base_yt_dlp_cmd() -> list[str]:
         proxies = [p.strip() for p in proxy_str.split(",") if p.strip()]
         if proxies:
             cmd.extend(["--proxy", random.choice(proxies)])
+    cookies = os.getenv("SHORTS_YTDLP_COOKIES")
+    if cookies and os.path.exists(cookies):
+        cmd.extend(["--cookies", cookies])
     return cmd
 
 

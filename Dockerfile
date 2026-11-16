@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # Install system packages (including ffmpeg and fonts for captions)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg git ca-certificates fonts-liberation fontconfig \
+    && apt-get install -y --no-install-recommends ffmpeg git ca-certificates fonts-liberation fonts-dejavu-core fontconfig \
     && rm -rf /var/lib/apt/lists/*
 
 # Set up non-root user for Hugging Face Spaces compliance

@@ -17,6 +17,8 @@ outputs/
 .agent/
 .agents/
 client_secret.json
+secrets/
+cookies.txt
 *.log
 scratch/
 *.db

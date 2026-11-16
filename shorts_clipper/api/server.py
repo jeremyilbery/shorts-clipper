@@ -100,6 +100,11 @@ def ensure_worker_running() -> None:
     import sys
     import time
 
+    import os
+
+    if os.environ.get("SHORTS_NO_AUTO_WORKER") == "1":
+        return  # a separate worker service (docker-compose) owns the queue
+
     heartbeat_path = Path("outputs/worker_heartbeat.txt")
     worker_running = False
     if heartbeat_path.exists():
