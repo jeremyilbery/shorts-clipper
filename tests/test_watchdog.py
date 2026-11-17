@@ -20,6 +20,12 @@ def test_new_uploads_are_returned_oldest_first():
     assert set(newly) == {"new1", "new2"}
 
 
+def test_uploads_older_than_the_last_handled_one_are_not_new():
+    entries = [_e("new"), _e("seen"), _e("older1"), _e("older2")]
+    to_clip, newly = find_new_uploads(entries, ["seen"], 20 * 60)
+    assert [e["id"] for e in to_clip] == ["new"] and newly == ["new"]
+
+
 def test_short_uploads_are_skipped_but_remembered():
     to_clip, newly = find_new_uploads([_e("trailer", duration=90)], ["old"], 20 * 60)
     assert to_clip == []

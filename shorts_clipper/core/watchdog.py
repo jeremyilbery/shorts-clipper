@@ -62,7 +62,11 @@ def find_new_uploads(
     newly_processed: list[str] = []
     for entry in entries:
         vid = entry.get("id")
-        if not vid or vid in done:
+        if vid in done:
+            # Everything below the newest handled upload is older: that's backfill's job,
+            # not a new upload (matters when the poll window grows or history is trimmed).
+            break
+        if not vid:
             continue
         if entry.get("live_status") in ("is_live", "is_upcoming", "post_live"):
             continue
