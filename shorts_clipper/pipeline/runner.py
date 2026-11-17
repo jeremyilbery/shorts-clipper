@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 
 from shorts_clipper.captions.generator import burn_subtitles
-from shorts_clipper.core.exceptions import MediaProcessingError
+from shorts_clipper.core.exceptions import YOUTUBE_RATE_LIMIT_429, MediaProcessingError
 from shorts_clipper.core.logging import configure_logging
 from shorts_clipper.core.models import ClipWindow
 from shorts_clipper.core.settings import Settings
@@ -138,14 +138,26 @@ def run(
                 log.info("\n--- PASS 1: ROUGH TRANSCRIPT FOR AI SELECTION ---")
                 if progress_callback:
                     progress_callback(10)
-                rough_segments = fetch_subtitles(url, work_path)
+                try:
+                    rough_segments = fetch_subtitles(url, work_path)
+                except YOUTUBE_RATE_LIMIT_429:
+                    # YouTube throttles its subtitle endpoint on its own; the audio
+                    # download usually still works, so transcribe it ourselves.
+                    log.warning("⚠️  Subtitles rate-limited by YouTube; transcribing audio instead.")
+                    rough_segments = []
 
                 if not rough_segments:
+                    # Shorts can be picked from a 5-min sample; long-form needs the whole
+                    # talk (capped at 2 h to keep Whisper time sane).
+                    sample_end = 300.0
+                    if long_count > 0:
+                        sample_end = min(source_duration or 7200.0, 7200.0)
                     log.warning(
-                        "⚠️  No native subtitles. Downloading 5-min audio sample for rough transcript..."
+                        "⚠️  No native subtitles. Transcribing the first %.0f min of audio...",
+                        sample_end / 60,
                     )
                     audio_path = work_path / "rough_audio.m4a"
-                    download_audio(url, audio_path, start_time=0.0, end_time=300.0)
+                    download_audio(url, audio_path, start_time=0.0, end_time=sample_end)
                     rough_segments = transcribe_clip(audio_path)
 
                 from shorts_clipper.attention.engine import SimulationEngine
