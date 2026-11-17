@@ -38,8 +38,9 @@ class ClipProfile:
 # Vertical 9:16 short for YouTube Shorts / Reels: 20–60 s finished, sped up 1.15×.
 SHORT = ClipProfile(kind="short", min_seconds=20.0, max_seconds=60.0, pacing=1.15, layout="center")
 
-# Long-form 16:9 clip for a regular YouTube upload: 8–12 min, normal speed.
-LONG = ClipProfile(kind="long", min_seconds=480.0, max_seconds=720.0, pacing=1.0, layout="landscape")
+# Long-form 16:9 clip for a regular YouTube upload: 8–19 min (always under 20), normal
+# speed. The AI picks the length the conversation needs inside that range.
+LONG = ClipProfile(kind="long", min_seconds=480.0, max_seconds=1140.0, pacing=1.0, layout="landscape")
 
 
 def fit_window(window: ClipWindow, profile: ClipProfile) -> ClipWindow:

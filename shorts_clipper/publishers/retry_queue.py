@@ -54,7 +54,8 @@ def next_quota_reset(now: float | None = None) -> float:
     return reset.timestamp()
 
 
-def _load(path: Path) -> dict:
+def _load(path: Path | None) -> dict:
+    path = Path(path or RETRY_FILE)  # resolved per call so tests can redirect RETRY_FILE
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(data, dict):
@@ -78,7 +79,7 @@ def enqueue_thumbnail(
     thumbnail_path: Path | str,
     *,
     reason: str | None = None,
-    path: Path = RETRY_FILE,
+    path: Path | None = None,
     now: float | None = None,
 ) -> None:
     """Retry setting a custom thumbnail later (YouTube rate-limits thumbnail uploads)."""
@@ -123,21 +124,22 @@ def _process_thumbnails(
     return done
 
 
-def _save(path: Path, data: dict) -> None:
+def _save(path: Path | None, data: dict) -> None:
+    path = Path(path or RETRY_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, path)
 
 
-def blocked_until(*, path: Path = RETRY_FILE, now: float | None = None) -> float | None:
+def blocked_until(*, path: Path | None = None, now: float | None = None) -> float | None:
     """If a daily limit was hit and has not reset yet, the time it resets; else None."""
     until = float(_load(path).get("blocked_until") or 0.0)
     current = now if now is not None else time.time()
     return until if until > current else None
 
 
-def record_upload(*, path: Path = RETRY_FILE, now: float | None = None) -> None:
+def record_upload(*, path: Path | None = None, now: float | None = None) -> None:
     """Log a successful YouTube upload, so backfill knows how much of today's quota is left."""
     current = now if now is not None else time.time()
     data = _load(path)
@@ -145,19 +147,35 @@ def record_upload(*, path: Path = RETRY_FILE, now: float | None = None) -> None:
     _save(path, data)
 
 
-def uploads_today(*, path: Path = RETRY_FILE, now: float | None = None) -> int:
-    """Successful YouTube uploads since the last daily quota reset."""
+def _recent_uploads(path: Path | None, current: float) -> list[float]:
+    return sorted(t for t in _load(path).get("uploads", []) if t > current - 86400)
+
+
+def uploads_last_24h(*, path: Path | None = None, now: float | None = None) -> int:
+    """Successful YouTube uploads in the last 24 hours.
+
+    A rolling window, not the calendar day: YouTube's per-channel upload cap is rolling,
+    and staying under the target in every 24 h window also keeps each quota day under it.
+    """
     current = now if now is not None else time.time()
-    since = next_quota_reset(current) - 86400
-    return sum(1 for t in _load(path).get("uploads", []) if t >= since)
+    return len(_recent_uploads(path, current))
 
 
-def has_pending(*, path: Path = RETRY_FILE) -> bool:
+def next_upload_slot(target: int, *, path: Path | None = None, now: float | None = None) -> float:
+    """Earliest time another upload keeps the last 24 h at or under ``target``."""
+    current = now if now is not None else time.time()
+    recent = _recent_uploads(path, current)
+    if len(recent) < target:
+        return current
+    return recent[len(recent) - target] + 86400 + 60
+
+
+def has_pending(*, path: Path | None = None) -> bool:
     """True if clips are waiting for the quota reset."""
     return bool(_load(path)["pending"])
 
 
-def mark_blocked(*, path: Path = RETRY_FILE, now: float | None = None) -> float:
+def mark_blocked(*, path: Path | None = None, now: float | None = None) -> float:
     """Record that the daily limit is used up. Returns the retry time."""
     data = _load(path)
     until = next_quota_reset(now)
@@ -173,13 +191,20 @@ def enqueue(
     platform: str = "youtube",
     sidecar_path: Path | str | None = None,
     reason: str | None = None,
-    path: Path = RETRY_FILE,
+    path: Path | None = None,
     now: float | None = None,
+    retry_at: float | None = None,
 ) -> float:
-    """Queue a clip for upload after the next quota reset. Returns the retry time."""
+    """Queue a clip for upload later. Returns the retry time.
+
+    Without ``retry_at`` YouTube refused the upload: wait for the next quota reset and
+    hold every other upload until then. With ``retry_at`` the clip is only being paced
+    (daily target reached), so nothing else is blocked.
+    """
     data = _load(path)
-    retry_at = max(float(data.get("blocked_until") or 0.0), next_quota_reset(now))
-    data["blocked_until"] = retry_at
+    if retry_at is None:
+        retry_at = max(float(data.get("blocked_until") or 0.0), next_quota_reset(now))
+        data["blocked_until"] = retry_at
     video = str(Path(video_path).resolve())
     # Re-queuing the same clip replaces its entry instead of uploading it twice.
     data["pending"] = [
@@ -249,12 +274,16 @@ MAX_OTHER_FAILURES = 3
 
 def process_due(
     *,
-    path: Path = RETRY_FILE,
+    path: Path | None = None,
     now: float | None = None,
     publish_fn: Callable[[Path, ClipMetadata, str], PublishResult] | None = None,
     thumbnail_fn: Callable[[str, Path], bool] | None = None,
+    limit: int | None = None,
 ) -> dict[str, int]:
-    """Upload queued clips (and thumbnails) whose retry time has passed. Safe to call often."""
+    """Upload queued clips (and thumbnails) whose retry time has passed. Safe to call often.
+
+    ``limit`` caps how many clips are uploaded this round (what's left of the daily target).
+    """
     current = now if now is not None else time.time()
     data = _load(path)
 
@@ -273,7 +302,8 @@ def process_due(
     blocked = False
 
     for entry in sorted(pending, key=lambda e: e.get("queued_at", 0)):
-        if blocked or entry.get("retry_at", 0) > current:
+        over_limit = limit is not None and stats["uploaded"] >= limit
+        if blocked or over_limit or entry.get("retry_at", 0) > current:
             remaining.append(entry)
             continue
 

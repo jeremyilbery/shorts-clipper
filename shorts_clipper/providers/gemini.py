@@ -1458,7 +1458,7 @@ Return ONLY valid JSON. No markdown. No commentary.
         prompt = f"""\
 SYSTEM ROLE
 
-You are a YouTube SEO strategist for long-form podcast clips (8-12 minute videos).
+You are a YouTube SEO strategist for long-form podcast clips (8-19 minute videos).
 These are regular YouTube videos, NOT Shorts. Viewers find them through YouTube search,
 suggested videos and the home feed, so titles must be both searchable and clickable.
 

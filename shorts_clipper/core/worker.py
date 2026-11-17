@@ -152,8 +152,11 @@ def run_worker() -> None:
             # While idle, upload clips held back by yesterday's YouTube quota.
             if time.time() - last_retry_check >= RETRY_CHECK_INTERVAL_S:
                 last_retry_check = time.time()
+                target = watchdog.daily_upload_target()
                 try:
-                    stats = retry_queue.process_due()
+                    stats = retry_queue.process_due(
+                        limit=max(0, target - retry_queue.uploads_last_24h())
+                    )
                     if any(stats.values()):
                         logger.info("🔁 Upload retry queue: %s", stats)
                 except Exception:
@@ -163,7 +166,7 @@ def run_worker() -> None:
                     if not watchdog.queue_due_retries(job_queue):
                         watchdog.queue_backfill(
                             job_queue,
-                            uploads_today=retry_queue.uploads_today(),
+                            uploads_today=retry_queue.uploads_last_24h(),
                             upload_blocked=bool(
                                 retry_queue.blocked_until() or retry_queue.has_pending()
                             ),

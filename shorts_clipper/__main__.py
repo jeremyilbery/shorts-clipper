@@ -189,7 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--long",
         type=int,
         default=0,
-        help="Number of long-form 16:9 clips (8-12 min) to extract (default: 0)",
+        help="Number of long-form 16:9 clips (8-19 min) to extract (default: 0)",
     )
     clip_p.add_argument(
         "--upload",

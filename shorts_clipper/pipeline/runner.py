@@ -636,13 +636,14 @@ def run(
                             else current_output_path
                         )
 
-                        def _defer_youtube(reason: str | None) -> None:
+                        def _defer_youtube(reason: str | None, at: float | None = None) -> None:
                             retry_at = retry_queue.enqueue(
                                 queue_video,
                                 clip_metadata,
                                 platform="youtube",
                                 sidecar_path=json_path,
                                 reason=reason,
+                                retry_at=at,
                             )
                             meta["retry_after"] = datetime.fromtimestamp(retry_at).isoformat(
                                 timespec="minutes"
@@ -655,6 +656,18 @@ def run(
                             try_now.remove("youtube")
                             deferred.append("youtube")
                             _defer_youtube("YouTube daily upload limit reached earlier today.")
+                        elif "youtube" in try_now:
+                            from shorts_clipper.core.watchdog import daily_upload_target
+
+                            target = daily_upload_target()
+                            if retry_queue.uploads_last_24h() >= target:
+                                # Keep to the daily target; upload when a slot frees up.
+                                try_now.remove("youtube")
+                                deferred.append("youtube")
+                                _defer_youtube(
+                                    f"Daily upload target ({target}/24h) reached.",
+                                    at=retry_queue.next_upload_slot(target),
+                                )
 
                         publish_results = {}
                         if try_now:

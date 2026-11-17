@@ -122,13 +122,43 @@ def test_failed_thumbnail_retries_hourly(tmp_path):
     assert json.loads(q.read_text())["thumbnails"] == []
 
 
-def test_upload_tally_resets_daily(tmp_path):
+def test_upload_tally_is_a_rolling_24h_window(tmp_path):
     q = tmp_path / "retry.json"
-    retry_queue.record_upload(path=q, now=_ts(2026, 11, 15, 7))  # before the 08:05 UTC reset
-    retry_queue.record_upload(path=q, now=_ts(2026, 11, 15, 9))
-    retry_queue.record_upload(path=q, now=_ts(2026, 11, 15, 20))
-    assert retry_queue.uploads_today(path=q, now=_ts(2026, 11, 15, 21)) == 2
-    assert retry_queue.uploads_today(path=q, now=_ts(2026, 11, 16, 9)) == 0
+    for h in (7, 9, 20):
+        retry_queue.record_upload(path=q, now=_ts(2026, 11, 15, h))
+    assert retry_queue.uploads_last_24h(path=q, now=_ts(2026, 11, 15, 21)) == 3
+    assert retry_queue.uploads_last_24h(path=q, now=_ts(2026, 11, 16, 8)) == 2
+    # Target 3 reached: the next slot opens when the 07:00 upload is 24 h old.
+    assert retry_queue.next_upload_slot(3, path=q, now=_ts(2026, 11, 15, 21)) == _ts(
+        2026, 11, 16, 7, 1
+    )
+    assert retry_queue.next_upload_slot(4, path=q, now=_ts(2026, 11, 15, 21)) == _ts(
+        2026, 11, 15, 21
+    )
+
+
+def test_paced_clip_does_not_block_other_uploads(tmp_path):
+    q = tmp_path / "retry.json"
+    video = tmp_path / "a.mp4"
+    video.write_bytes(b"x")
+    now = _ts(2026, 11, 15, 10)
+    retry_queue.enqueue(video, _meta(), path=q, now=now, retry_at=now + 600)
+    assert retry_queue.blocked_until(path=q, now=now) is None
+
+
+def test_process_due_respects_limit(tmp_path):
+    q = tmp_path / "retry.json"
+    now = _ts(2026, 11, 15, 10)
+    for name in ("a.mp4", "b.mp4", "c.mp4"):
+        (tmp_path / name).write_bytes(b"x")
+        retry_queue.enqueue(tmp_path / name, _meta(), path=q, now=now, retry_at=now)
+    publish = MagicMock(
+        return_value=PublishResult(platform="youtube", success=True, url="u", platform_id="i")
+    )
+    stats = retry_queue.process_due(path=q, now=now + 1, publish_fn=publish, limit=2)
+    assert stats["uploaded"] == 2
+    assert len(json.loads(q.read_text())["pending"]) == 1
+    assert retry_queue.process_due(path=q, now=now + 2, publish_fn=publish, limit=0)["uploaded"] == 0
 
 
 def test_youtube_only_publish_does_not_need_r2(tmp_path):

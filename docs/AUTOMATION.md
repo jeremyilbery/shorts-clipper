@@ -1,7 +1,7 @@
 # Automatic clipping of watched channels
 
 The background worker checks the channels you choose every 10 minutes. When one
-posts a new full-length video, it makes **2 long-form clips (8–12 min, 16:9)** and
+posts a new full-length video, it makes **2 long-form clips (8–19 min, 16:9, length set by the conversation)** and
 **1 Short (20–60 s, vertical)**, writes their titles, descriptions, tags and chapters,
 and uploads them to your YouTube channel as **private** videos for you to review.
 

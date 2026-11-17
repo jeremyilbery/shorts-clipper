@@ -177,6 +177,7 @@ You are an Attention Prediction Engine.
 Analyze the following transcript and identify the TOP {requested} BEST highlights.
 Each highlight MUST be between {min_seconds:.0f}s and {max_seconds:.0f}s long (end_time - start_time).
 A highlight must be a complete, self-contained segment that makes sense on its own.
+Make each highlight as long as the moment needs within that range: start where the topic starts and end where it naturally wraps up. Don't cut a story off early to stay short, and don't pad it with unrelated talk to get longer.
 Highlights must NOT overlap in time.
 Evaluate based on true semantics: conflict, surprise, stakes, emotion, transformation, curiosity, tension, and resolution.
 Do NOT rely on simple keywords. Look for story progression and emotional peaks.

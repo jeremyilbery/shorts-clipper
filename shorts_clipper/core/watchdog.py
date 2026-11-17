@@ -297,6 +297,15 @@ def queue_due_retries(job_queue, *, path: Path | None = None, now: float | None 
     return len(due)
 
 
+def daily_upload_target(*, path: Path | None = None) -> int:
+    """Automatic YouTube uploads allowed per rolling 24 h (watchdog.json daily_upload_target)."""
+    data = _load_watchdog(Path(path or WATCHDOG_PATH)) or {}
+    try:
+        return int(data.get("daily_upload_target", DAILY_UPLOAD_TARGET))
+    except (TypeError, ValueError):
+        return DAILY_UPLOAD_TARGET
+
+
 def pick_backfill(data: dict, exclude: set[str]) -> tuple[dict, dict, dict] | None:
     """Most recent not-yet-clipped episode across channels. Returns (entry, channel, opts).
 

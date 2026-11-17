@@ -15,8 +15,9 @@ def test_short_finished_length_is_20_to_60s_after_speedup():
     assert not SHORT.landscape
 
 
-def test_long_is_8_to_12_min_landscape_without_speedup():
-    assert (LONG.source_min, LONG.source_max) == (480, 720)
+def test_long_is_8_to_under_20_min_landscape_without_speedup():
+    assert (LONG.source_min, LONG.source_max) == (480, 1140)
+    assert LONG.max_seconds < 20 * 60
     assert LONG.pacing == 1.0
     assert LONG.landscape
 
@@ -28,7 +29,7 @@ def test_fit_window_extends_too_short_window():
 
 
 def test_fit_window_trims_too_long_window():
-    w = fit_window(ClipWindow(start=100.0, end=1000.0), LONG)
+    w = fit_window(ClipWindow(start=100.0, end=1500.0), LONG)
     assert w.start == 100.0
     assert w.end - w.start == pytest.approx(LONG.source_max)
 
