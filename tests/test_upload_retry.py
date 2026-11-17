@@ -122,6 +122,15 @@ def test_failed_thumbnail_retries_hourly(tmp_path):
     assert json.loads(q.read_text())["thumbnails"] == []
 
 
+def test_upload_tally_resets_daily(tmp_path):
+    q = tmp_path / "retry.json"
+    retry_queue.record_upload(path=q, now=_ts(2026, 11, 15, 7))  # before the 08:05 UTC reset
+    retry_queue.record_upload(path=q, now=_ts(2026, 11, 15, 9))
+    retry_queue.record_upload(path=q, now=_ts(2026, 11, 15, 20))
+    assert retry_queue.uploads_today(path=q, now=_ts(2026, 11, 15, 21)) == 2
+    assert retry_queue.uploads_today(path=q, now=_ts(2026, 11, 16, 9)) == 0
+
+
 def test_youtube_only_publish_does_not_need_r2(tmp_path):
     video = tmp_path / "clip.mp4"
     video.write_bytes(b"x")

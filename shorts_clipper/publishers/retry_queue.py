@@ -137,6 +137,26 @@ def blocked_until(*, path: Path = RETRY_FILE, now: float | None = None) -> float
     return until if until > current else None
 
 
+def record_upload(*, path: Path = RETRY_FILE, now: float | None = None) -> None:
+    """Log a successful YouTube upload, so backfill knows how much of today's quota is left."""
+    current = now if now is not None else time.time()
+    data = _load(path)
+    data["uploads"] = [t for t in data.get("uploads", []) if t > current - 2 * 86400] + [current]
+    _save(path, data)
+
+
+def uploads_today(*, path: Path = RETRY_FILE, now: float | None = None) -> int:
+    """Successful YouTube uploads since the last daily quota reset."""
+    current = now if now is not None else time.time()
+    since = next_quota_reset(current) - 86400
+    return sum(1 for t in _load(path).get("uploads", []) if t >= since)
+
+
+def has_pending(*, path: Path = RETRY_FILE) -> bool:
+    """True if clips are waiting for the quota reset."""
+    return bool(_load(path)["pending"])
+
+
 def mark_blocked(*, path: Path = RETRY_FILE, now: float | None = None) -> float:
     """Record that the daily limit is used up. Returns the retry time."""
     data = _load(path)
@@ -323,5 +343,7 @@ def process_due(
         float(data.get("blocked_until") or 0.0), float(latest.get("blocked_until") or 0.0)
     )
     data["pending"] = remaining
+    # Uploads done above were tallied straight into the file; keep that tally.
+    data["uploads"] = latest.get("uploads", [])
     _save(path, data)
     return stats

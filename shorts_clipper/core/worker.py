@@ -19,6 +19,7 @@ from pathlib import Path
 from shorts_clipper.core.logging import configure_logging
 from shorts_clipper.core.queue import JobQueue, JobStatus
 from shorts_clipper.core.settings import Settings
+from shorts_clipper.core import watchdog
 from shorts_clipper.core.watchdog import check_watchdog_channels
 from shorts_clipper.pipeline.runner import run, run_autopilot
 from shorts_clipper.providers import get_provider
@@ -157,6 +158,18 @@ def run_worker() -> None:
                         logger.info("🔁 Upload retry queue: %s", stats)
                 except Exception:
                     logger.exception("Upload retry queue check failed")
+                try:
+                    # Failed episodes first, then older episodes to fill today's uploads.
+                    if not watchdog.queue_due_retries(job_queue):
+                        watchdog.queue_backfill(
+                            job_queue,
+                            uploads_today=retry_queue.uploads_today(),
+                            upload_blocked=bool(
+                                retry_queue.blocked_until() or retry_queue.has_pending()
+                            ),
+                        )
+                except Exception:
+                    logger.exception("Watchdog retry/backfill check failed")
             continue
 
         active_job_id = job.id
@@ -346,6 +359,11 @@ def run_worker() -> None:
             logger.exception("❌ Job %s failed: %s", job.id, exc)
             cancel_active_processes()
             job_queue.update_status(job.id, JobStatus.FAILED, error=str(exc))
+            if job.kind == "clip":
+                try:
+                    watchdog.record_failure(job.payload, str(exc))
+                except Exception:
+                    logger.exception("Could not schedule a retry for job %s", job.id)
         finally:
             active_job_id = None
             with _proc_lock:

@@ -83,6 +83,66 @@ def test_already_processed_upload_is_not_queued_again(tmp_path, monkeypatch):
     queue.create.assert_not_called()
 
 
+def _backfill_config(**extra):
+    return {
+        "enabled": True,
+        "queued_ids": ["a1"],
+        "channels": [
+            {"name": "A", "url": "ua", "recent": [_e("a1"), _e("a2"), _e("a3")]},
+            {"name": "B", "url": "ub", "recent": [_e("b1"), _e("short", duration=600)]},
+        ],
+        **extra,
+    }
+
+
+def _write(tmp_path, config):
+    p = tmp_path / "watchdog.json"
+    p.write_text(json.dumps(config))
+    return p
+
+
+def test_backfill_takes_newest_unclipped_episode_channel_by_channel(tmp_path):
+    p = _write(tmp_path, _backfill_config())
+    queue = mock.Mock()
+    picked = []
+    for _ in range(4):
+        payload = watchdog.queue_backfill(queue, uploads_today=0, upload_blocked=False, path=p)
+        picked.append(payload and payload["url"].split("=")[-1])
+    # a1 was already clipped; "short" is under the minimum length.
+    assert picked == ["b1", "a2", "a3", None]
+    assert queue.create.call_args.args[1]["origin"] == "backfill"
+
+
+def test_backfill_respects_daily_upload_target(tmp_path):
+    p = _write(tmp_path, _backfill_config())
+    queue = mock.Mock()
+    # 2 long + 1 Short per episode: 3 uploads done leaves room for one more episode.
+    assert watchdog.queue_backfill(queue, uploads_today=3, upload_blocked=False, path=p)
+    assert watchdog.queue_backfill(queue, uploads_today=4, upload_blocked=False, path=p) is None
+    assert watchdog.queue_backfill(queue, uploads_today=0, upload_blocked=True, path=p) is None
+    assert queue.create.call_count == 1
+
+
+def test_failed_job_is_retried_then_given_up(tmp_path):
+    p = _write(tmp_path, {"enabled": True, "channels": []})
+    payload = {"url": "https://www.youtube.com/watch?v=x", "origin": "watchdog"}
+    queue = mock.Mock()
+    now = 1_000_000.0
+    assert watchdog.record_failure(payload, "Rate limited by YouTube", path=p, now=now)
+    assert watchdog.queue_due_retries(queue, path=p, now=now + 60) == 0
+    assert watchdog.queue_due_retries(queue, path=p, now=now + 3601) == 1
+    retried = queue.create.call_args.args[1]
+    assert retried["attempt"] == 1 and retried["url"] == payload["url"]
+    # Third retry fails too -> no more attempts.
+    assert watchdog.record_failure({**retried, "attempt": 3}, "boom", path=p, now=now)is False
+    assert json.loads(p.read_text())["retry_jobs"] == []
+
+
+def test_manual_clip_failure_is_not_retried(tmp_path):
+    p = _write(tmp_path, {"enabled": True, "channels": []})
+    assert not watchdog.record_failure({"url": "u"}, "err", path=p)
+
+
 def test_disabled_watchdog_does_nothing(tmp_path, monkeypatch):
     config = {"enabled": False, "channels": [{"name": "Pod", "url": "u", "processed_videos": ["a"]}]}
     queue, _ = _run_check(tmp_path, monkeypatch, config, [_e("new")])

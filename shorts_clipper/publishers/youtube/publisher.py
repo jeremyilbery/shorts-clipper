@@ -39,6 +39,13 @@ class YouTubePublisher(Publisher):
                 privacy_status=metadata.privacy_status,
                 progress_callback=progress_callback,
             )
+            if video_id:
+                try:
+                    from ..retry_queue import record_upload
+
+                    record_upload()
+                except Exception as exc:
+                    log.warning("Could not record upload in the daily tally: %s", exc)
             if video_id and metadata.thumbnail_path:
                 if not set_thumbnail(video_id, metadata.thumbnail_path):
                     # Usually YouTube's thumbnail rate limit: try again later.
