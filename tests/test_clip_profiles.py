@@ -22,6 +22,33 @@ def test_long_is_8_to_under_20_min_landscape_without_speedup():
     assert LONG.landscape
 
 
+def _seg(start, end):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(start=start, end=end)
+
+
+def test_full_video_window_spans_first_to_last_word():
+    from shorts_clipper.pipeline.profiles import full_video_window
+
+    w = full_video_window([_seg(3.0, 10.0), _seg(10.0, 395.0)], 400.0)
+    assert (w.start, w.end) == (3.0, 396.0)
+
+
+def test_full_video_window_falls_back_to_duration_without_full_subtitles():
+    from shorts_clipper.pipeline.profiles import full_video_window
+
+    # Only a 5-minute audio sample was transcribed.
+    w = full_video_window([_seg(0.0, 300.0)], 700.0)
+    assert (w.start, w.end) == (0.0, 700.0)
+
+
+def test_full_video_window_is_none_over_the_cap():
+    from shorts_clipper.pipeline.profiles import full_video_window
+
+    assert full_video_window([_seg(0.0, 1800.0)], 1800.0) is None
+
+
 def test_fit_window_extends_too_short_window():
     w = fit_window(ClipWindow(start=100.0, end=115.0), SHORT)
     assert w.start == 100.0

@@ -32,7 +32,15 @@ from shorts_clipper.downloader.yt_dlp import (
     fetch_subtitles,
 )
 from shorts_clipper.pipeline.finisher import EditorialFinisher
-from shorts_clipper.pipeline.profiles import LONG, SHORT, ClipProfile, fit_window
+from shorts_clipper.pipeline.profiles import (
+    FULL,
+    FULL_TRIM_MIN_S,
+    LONG,
+    SHORT,
+    ClipProfile,
+    fit_window,
+    full_video_window,
+)
 from shorts_clipper.providers import get_provider
 from shorts_clipper.publishers import ClipMetadata, PublishingEngine, retry_queue
 from shorts_clipper.rendering.crop import process_to_vertical
@@ -62,9 +70,14 @@ def run(
     preselected_clips: list | None = None,
     source_title: str | None = None,
     source_channel: str | None = None,
+    full_video: bool = False,
+    source_duration: float | None = None,
 ) -> Path | list[Path]:
     """
     Run the full shorts clipping pipeline for a given YouTube URL.
+
+    ``full_video``: the source is already a clip, so the long-form output is nearly the
+    whole video (best 15–19 min if it runs over the long-form cap).
 
     Encode flow (2 passes — no triple re-encode):
       1. process_to_vertical   — scale + crop to 1080×1920
@@ -143,8 +156,22 @@ def run(
                     generator = SemanticCandidateGenerator()
                     # (profile, score, window, reasoning) for every clip still to be made.
                     candidates: list[tuple[ClipProfile, float, list, str]] = []
-                    for profile, needed in ((SHORT, count - len(clips)), (LONG, long_count)):
+                    long_profile = FULL if full_video else LONG
+                    whole = (
+                        full_video_window(rough_segments, source_duration) if full_video else None
+                    )
+                    for profile, needed in ((SHORT, count - len(clips)), (long_profile, long_count)):
                         if needed <= 0:
+                            continue
+                        if profile is FULL and whole is not None:
+                            log.info(
+                                "Using the whole video as the long-form clip (%.0f–%.0fs)",
+                                whole.start,
+                                whole.end,
+                            )
+                            candidates.append(
+                                (profile, 100.0, list(rough_segments), "full video")
+                            )
                             continue
                         log.info(
                             "Selecting %d %s highlight(s) (%.0f–%.0fs of source)",
@@ -154,7 +181,8 @@ def run(
                             profile.source_max,
                         )
                         range_kwargs = {
-                            "min_seconds": profile.source_min,
+                            # Over-long "already a clip" videos: keep most of it.
+                            "min_seconds": FULL_TRIM_MIN_S if profile is FULL else profile.source_min,
                             "max_seconds": profile.source_max,
                         }
                         if needed > 1:
@@ -289,6 +317,8 @@ def run(
                         selected = ClipWindow(
                             start=winner_variant.start_time, end=winner_variant.end_time
                         )
+                        if _reasoning == "full video" and whole is not None:
+                            selected = whole  # don't let the optimiser trim the video
                         new_clip_window = fit_window(selected, profile)
                         if new_clip_window != selected:
                             log.info(

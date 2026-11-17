@@ -144,6 +144,26 @@ def test_failed_job_is_retried_then_given_up(tmp_path):
     assert json.loads(p.read_text())["retry_jobs"] == []
 
 
+def test_clip_channel_uploads_wait_for_backfill(tmp_path, monkeypatch):
+    config = {
+        "enabled": True,
+        "channels": [
+            {"name": "Clips", "url": "u", "processed_videos": ["a"], "full_video": True,
+             "long": 1, "short": 0, "min_duration_minutes": 5}
+        ],
+    }
+    queue, saved = _run_check(tmp_path, monkeypatch, config, [_e("new", duration=600), _e("a")])
+    queue.create.assert_not_called()  # not queued straight away...
+    p = tmp_path / "outputs" / "watchdog.json"
+    saved["queued_ids"] = []
+    p.write_text(json.dumps(saved))
+    payload = watchdog.queue_backfill(queue, uploads_today=5, upload_blocked=False, path=p)
+    # ...but backfill takes it with the last free slot, as a whole-video job.
+    assert payload["url"].endswith("new")
+    assert payload["full_video"] is True and payload["source_duration"] == 600
+    assert (payload["long_count"], payload["count"]) == (1, 0)
+
+
 def test_manual_clip_failure_is_not_retried(tmp_path):
     p = _write(tmp_path, {"enabled": True, "channels": []})
     assert not watchdog.record_failure({"url": "u"}, "err", path=p)

@@ -33,6 +33,8 @@ WATCHDOG_DEFAULTS = {
     "upload": True,
     "privacy": "private",  # uploads wait for you to review and publish them
     "min_duration_minutes": 20,  # ignore uploads shorter than this (trailers, shorts, promos)
+    # Channel already posts clips: the long-form upload is (nearly) the whole video.
+    "full_video": False,
 }
 _PROCESSED_HISTORY = 200  # how many video ids to remember per channel
 _POLL_ENTRIES = 30  # newest uploads to inspect per poll (also the backfill pool)
@@ -174,6 +176,11 @@ def _check_channels(job_queue: JobQueue, force: bool) -> None:
             to_clip, newly = find_new_uploads(
                 entries, processed, float(opts["min_duration_minutes"]) * 60
             )
+            if opts.get("full_video"):
+                # Clip channels post several videos a day, more than the upload allowance.
+                # Their uploads wait in the backfill pool (newest first) instead of
+                # jumping the queue, so they only use slots the main episodes leave free.
+                to_clip = []
             for entry in to_clip:
                 video_url = f"https://www.youtube.com/watch?v={entry['id']}"
                 logger.info("🔔 Watchdog: New upload on %s: %s", name, video_url)
@@ -204,6 +211,8 @@ def _clip_payload(entry: dict, ch: dict, opts: dict, origin: str) -> dict:
         "source_title": entry.get("title") or "",
         "source_channel": ch.get("name") or entry.get("channel") or "",
         "origin": origin,
+        "full_video": bool(opts.get("full_video")),
+        "source_duration": entry.get("duration"),
     }
 
 
@@ -306,16 +315,25 @@ def daily_upload_target(*, path: Path | None = None) -> int:
         return DAILY_UPLOAD_TARGET
 
 
-def pick_backfill(data: dict, exclude: set[str]) -> tuple[dict, dict, dict] | None:
+def _uploads_per_video(opts: dict) -> int:
+    return int(opts["long"]) + int(opts["short"]) if opts["upload"] else 0
+
+
+def pick_backfill(
+    data: dict, exclude: set[str], room: int | None = None
+) -> tuple[dict, dict, dict] | None:
     """Most recent not-yet-clipped episode across channels. Returns (entry, channel, opts).
 
     "Recent" is the position in each channel's upload list, so every channel's latest
-    episode comes before anyone's second-latest.
+    episode comes before anyone's second-latest. Channels whose videos need more uploads
+    than ``room`` are passed over, so a 1-upload clip can use the last free slot.
     """
     defaults = {**WATCHDOG_DEFAULTS, **data.get("defaults", {})}
     best = None
     for ch_i, ch in enumerate(data.get("channels", [])):
         opts = {**defaults, **{k: v for k, v in ch.items() if k in WATCHDOG_DEFAULTS}}
+        if room is not None and _uploads_per_video(opts) > room:
+            continue
         min_s = float(opts["min_duration_minutes"]) * 60
         for pos, e in enumerate(ch.get("recent") or []):
             if e["id"] in exclude or (e.get("duration") is not None and e["duration"] < min_s):
@@ -349,13 +367,13 @@ def queue_backfill(
         if "queued_ids" not in data:
             data["queued_ids"] = sorted(_clipped_before(path.parent))
         exclude = set(data["queued_ids"])
-        picked = pick_backfill(data, exclude)
+        room = target - uploads_today
+        if room <= 0:
+            return None
+        picked = pick_backfill(data, exclude, room)
         if picked is None:
             return None
         entry, ch, opts = picked
-        per_episode = int(opts["long"]) + int(opts["short"]) if opts["upload"] else 0
-        if per_episode and uploads_today + per_episode > target:
-            return None
         payload = _clip_payload(entry, ch, opts, "backfill")
         logger.info(
             "📚 Backfill (%d/%d uploads today): %s — %s",

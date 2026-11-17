@@ -246,6 +246,8 @@ def run_worker() -> None:
                     progress_callback=worker_progress,
                     source_title=payload.get("source_title"),
                     source_channel=payload.get("source_channel"),
+                    full_video=bool(payload.get("full_video")),
+                    source_duration=payload.get("source_duration"),
                 )
                 output_paths = []
                 if isinstance(result, list):
