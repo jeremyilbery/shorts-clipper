@@ -541,6 +541,19 @@ def publish_clip(
             status_code=400, detail="Publishing is already in progress for this clip."
         )
 
+    from shorts_clipper.publishers import retry_queue
+
+    until = retry_queue.blocked_until()
+    if until and "youtube" in settings.publish_platforms and not meta.get("youtube_video_id"):
+        when = datetime.fromtimestamp(until).strftime("%b %d %I:%M %p")
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                "YouTube's upload limit for this channel is used up. Clips already in the "
+                f"upload queue go up automatically after {when}."
+            ),
+        )
+
     if not title:
         title = path.stem.replace("_", " ").title()
 
